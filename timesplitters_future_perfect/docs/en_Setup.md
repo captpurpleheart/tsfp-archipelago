@@ -45,5 +45,5 @@
   are never missed.
 * **After a crash:** your items and the checks already sent are safe, because the server keeps
   them. Anything the game had not saved (a trophy or a level completion) is missing from the
-  profile, which matters for the Story Levels Required count and the All Trophies goal: earn it
+  profile, which matters for the 1924 Future Perfect requirements and the Trophy Hunt goal: earn it
   again.

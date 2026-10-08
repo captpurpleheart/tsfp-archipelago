@@ -28,15 +28,17 @@ class TsfpLocation(Location):
 class StartingItem(Choice):
     """
     What you start with (as well as one random character and one random weapon).
-    Random Arcade Or Challenge Mission: one of the 48 Arcade League missions and Challenges.
-    Random Arcade Mission: one of the 27 Arcade League missions.
-    Random Challenge Mission: one of the 21 Challenges.
+    Random Arcade Or Challenge Mission: Arcade League missions and Challenges.
+    Random Arcade Mission: Arcade League missions.
+    Random Challenge Mission: Challenges.
     Random Story Mission: one story level, never 1924 Future Perfect.
-    Random Any Mission: one mission from any of the three pools (never 1924 Future Perfect).
+    Random Any Mission: from all three pools (never 1924 Future Perfect). If the first one is a story
+    level, it is the only one.
     Time To Split: 2401 Time To Split.
     With Progressive Story Level, a story start is always 2401 Time To Split (one Progressive Story Level).
+    With Trophy Hunt and Exclude Story Mode, story starts become Random Arcade Or Challenge Mission.
     """
-    display_name = "Starting Item"
+    display_name = "Starting Mission"
     option_random_arcade_or_challenge_mission = 0
     option_random_arcade_mission = 1
     option_random_challenge_mission = 2
@@ -46,12 +48,24 @@ class StartingItem(Choice):
     default = 0
 
 
+class StartingMissionCount(Range):
+    """
+    How many Arcade League missions or Challenges you start with. Only applies to the Random Arcade Or
+    Challenge, Random Arcade, Random Challenge and Random Any options (with Random Any, a story level
+    rolled first is the only starting mission).
+    """
+    display_name = "How Many Starting Arcade/Challenge Missions"
+    range_start = 1
+    range_end = 5
+    default = 1
+
+
 class StoryMode(Choice):
     """
     Individual Items: every story level is its own item. Finding "2401 Time To Split" unlocks that level.
     Progressive Story Level: story levels unlock in order, one more for each Progressive Story Level you have.
     """
-    display_name = "Story Mode Setting"
+    display_name = "Story Mode Status"
     option_individual_items = game_data.STORY_INDIVIDUAL
     option_progressive_story_level = game_data.STORY_PROGRESSIVE
     default = game_data.STORY_INDIVIDUAL
@@ -59,35 +73,85 @@ class StoryMode(Choice):
 
 class Goal(Choice):
     """
-    Future Perfect: complete 1924 Future Perfect (on any difficulty).
-    All Trophies: earn a trophy of the chosen grade or better on every Arcade League mission and Challenge.
+    1924 Future Perfect: complete 1924 Future Perfect (on any difficulty). Its extra requirements are
+    under "Goal Options - 1924 Future Perfect".
+    Trophy Hunt: earn trophies on Arcade League missions and/or Challenges, as set under
+    "Goal Options - Trophy Hunt".
     """
     display_name = "Goal"
     option_future_perfect = game_data.GOAL_FUTURE_PERFECT
-    option_all_trophies = game_data.GOAL_ALL_TROPHIES
+    option_trophy_hunt = game_data.GOAL_ALL_TROPHIES
+    alias_all_trophies = game_data.GOAL_ALL_TROPHIES
     default = game_data.GOAL_FUTURE_PERFECT
 
 
 class StoryLevelsRequired(Range):
     """
-    Only used when the goal is Future Perfect. How many of the other 12 story levels you must have
-    completed before 1924 Future Perfect opens (you also need its item, or all 13 Progressive
+    Only used when the goal is 1924 Future Perfect. How many of the other 12 story levels you must
+    have completed before 1924 Future Perfect opens (you also need its item, or all 13 Progressive
     Story Levels).
     """
-    display_name = "Story Levels Required For Goal"
+    display_name = "Story Levels Required To Access Goal"
     range_start = 0
     range_end = game_data.FINAL_STORY_LEVEL
     default = game_data.FINAL_STORY_LEVEL
 
 
+class TrophiesRequired(Range):
+    """
+    Only used when the goal is 1924 Future Perfect. How many Arcade League missions and Challenges
+    you must have beaten (with at least the grade below) before 1924 Future Perfect opens.
+    0 = none needed.
+    """
+    display_name = "How Many Trophies Required To Access Goal"
+    range_start = 0
+    range_end = len(game_data.MISSIONS)
+    default = 0
+
+
+class TrophiesRequiredGrade(Choice):
+    """
+    Only used when the goal is 1924 Future Perfect. The lowest trophy that counts towards
+    "How Many Trophies Required To Access Goal".
+    """
+    display_name = "Minimum Grade Of Trophy To Count"
+    option_bronze = 1
+    option_silver = 2
+    option_gold = 3
+    option_platinum = 4
+    default = 1
+
+
+class TrophyHuntSetting(Choice):
+    """
+    Only used when the goal is Trophy Hunt. Which missions you need a trophy on.
+    All Arcade Missions: the 27 Arcade League missions.
+    All Challenges: the 21 Challenges.
+    All Trophies: all 48.
+    """
+    display_name = "Trophy Hunt Goal Setting"
+    option_all_arcade_missions = game_data.HUNT_ARCADE
+    option_all_challenges = game_data.HUNT_CHALLENGES
+    option_all_trophies = game_data.HUNT_ALL
+    default = game_data.HUNT_ALL
+
+
 class TrophyGrade(Choice):
-    """Only used when the goal is All Trophies. The lowest trophy you need on every mission."""
+    """Only used when the goal is Trophy Hunt. The lowest trophy you need on each of those missions."""
     display_name = "Trophy Grade Required For Goal"
     option_bronze = 1
     option_silver = 2
     option_gold = 3
     option_platinum = 4
     default = 1
+
+
+class ExcludeStoryMode(Toggle):
+    """
+    Only used when the goal is Trophy Hunt. Story Mode locations never hold anything required to
+    win (only useful and filler items, so weapon buffs and bonus items can still be found there).
+    """
+    display_name = "Exclude Story Mode"
 
 
 class ExcludeHardStory(DefaultOnToggle):
@@ -246,12 +310,17 @@ class AllChallengesMilestone(DefaultOnToggle):
 @dataclass
 class TsfpOptions(PerGameCommonOptions):
     starting_item: StartingItem
+    starting_mission_count: StartingMissionCount
     story_mode: StoryMode
+    goal: Goal
     death_link: DeathLink
     streamer_mode: StreamerMode
-    goal: Goal
     story_levels_required: StoryLevelsRequired
+    trophies_required: TrophiesRequired
+    trophies_required_grade: TrophiesRequiredGrade
+    trophy_hunt_setting: TrophyHuntSetting
     trophy_grade: TrophyGrade
+    exclude_story_mode: ExcludeStoryMode
     exclude_hard_story: ExcludeHardStory
     exclude_all_platinum: ExcludeAllPlatinum
     exclude_platinum_trophies: ExcludePlatinumTrophies
@@ -283,8 +352,11 @@ class TsfpWebWorld(WebWorld):
         )
     ]
     option_groups = [
-        OptionGroup("Game Options", [StartingItem, StoryMode, DeathLink, StreamerMode]),
-        OptionGroup("Goal Options", [Goal, StoryLevelsRequired, TrophyGrade]),
+        OptionGroup("Game Options", [StartingItem, StartingMissionCount, StoryMode, Goal, DeathLink,
+                                     StreamerMode]),
+        OptionGroup("Goal Options - 1924 Future Perfect", [StoryLevelsRequired, TrophiesRequired,
+                                                           TrophiesRequiredGrade]),
+        OptionGroup("Goal Options - Trophy Hunt", [TrophyHuntSetting, TrophyGrade, ExcludeStoryMode]),
         OptionGroup("Difficulty Settings", [ExcludeHardStory, ExcludeAllPlatinum, ExcludePlatinumTrophies,
                                             EasierAstroJocks, EasierRumbleInTheJungle, EasierCutOutShootOut,
                                             QuickerElectroChimpDiscomatic]),
@@ -323,6 +395,7 @@ class TsfpWorld(World):
     ut_can_gen_without_yaml = True
 
     starting_opener: str = ""
+    starting_openers: list[str]
     starting_character: str = ""
     starting_weapon: str = ""
 
@@ -334,6 +407,41 @@ class TsfpWorld(World):
     def story_goal(self) -> bool:
         return self.options.goal == game_data.GOAL_FUTURE_PERFECT
 
+    @property
+    def story_excluded(self) -> bool:
+        return not self.story_goal and bool(self.options.exclude_story_mode)
+
+    @property
+    def hunted(self) -> set[str]:
+        """Item names of the missions on the goal path (empty for the 1924 Future Perfect goal)."""
+        if self.story_goal:
+            return set()
+        return {m.item_name for m in game_data.hunted_missions(self.options.trophy_hunt_setting.value)}
+
+    def choose_starting_missions(self) -> list[str]:
+        """The starting mission(s), following the Starting Mission, count and league options."""
+        stories = list(game_data.STORY_ITEM_NAMES[:game_data.FINAL_STORY_LEVEL])   # never Future Perfect
+        choice = self.options.starting_item.value
+        if self.story_excluded and choice in (StartingItem.option_random_story_mission,
+                                              StartingItem.option_time_to_split):
+            choice = StartingItem.option_random_arcade_or_challenge_mission
+        if choice == StartingItem.option_random_story_mission:
+            return [self.random.choice(stories)]
+        if choice == StartingItem.option_time_to_split:
+            return [game_data.STORY_ITEM_NAMES[0]]
+        if choice == StartingItem.option_random_arcade_mission:
+            pool = list(game_data.ARCADE_ITEM_NAMES)
+        elif choice == StartingItem.option_random_challenge_mission:
+            pool = list(game_data.CHALLENGE_ITEM_NAMES)
+        else:
+            pool = list(game_data.MISSION_ITEM_NAMES)
+        if choice == StartingItem.option_random_any_mission and not self.story_excluded:
+            first = self.random.choice(pool + stories)
+            if first in stories:
+                return [first]
+        count = min(self.options.starting_mission_count.value, len(pool))
+        return self.random.sample(pool, count)
+
     def generate_early(self) -> None:
         # Universal Tracker rebuilds the world from the slot data of the game you connected to.
         passthrough = getattr(self.multiworld, "re_gen_passthrough", {}).get(self.game)
@@ -342,6 +450,10 @@ class TsfpWorld(World):
             self.options.goal.value = passthrough["goal"]
             self.options.story_levels_required.value = passthrough["story_levels_required"]
             self.options.trophy_grade.value = passthrough["trophy_grade"]
+            self.options.trophies_required.value = passthrough.get("trophies_required", 0)
+            self.options.trophies_required_grade.value = passthrough.get("trophies_required_grade", 1)
+            self.options.trophy_hunt_setting.value = passthrough.get("trophy_hunt_setting", game_data.HUNT_ALL)
+            self.options.exclude_story_mode.value = passthrough.get("exclude_story_mode", 0)
             self.options.arcade_group_milestones.value = passthrough["arcade_group_milestones"]
             self.options.challenge_group_milestones.value = passthrough["challenge_group_milestones"]
             self.options.league_milestones.value = passthrough["league_milestones"]
@@ -350,31 +462,20 @@ class TsfpWorld(World):
             self.options.misc_score_multiplier.value = passthrough.get("misc_score_multiplier", 0)
             self.options.starting_armour.value = passthrough["starting_armour"]
             self.options.include_weapon_buffs.value = passthrough["include_weapon_buffs"]
-            self.starting_opener = passthrough["starting_opener"]
+            self.starting_openers = list(passthrough.get("starting_openers", [passthrough["starting_opener"]]))
+            self.starting_opener = self.starting_openers[0]
             self.starting_character = passthrough["starting_character"]
             self.starting_weapon = passthrough["starting_weapon"]
-            for name in (self.starting_opener, self.starting_character, self.starting_weapon):
+            for name in (*self.starting_openers, self.starting_character, self.starting_weapon):
                 self.multiworld.push_precollected(self.create_item(name))
             return
-        story = list(game_data.STORY_ITEM_NAMES[:game_data.FINAL_STORY_LEVEL])   # never Future Perfect
-        choice = self.options.starting_item
-        if choice == StartingItem.option_random_arcade_mission:
-            pool = list(game_data.ARCADE_ITEM_NAMES)
-        elif choice == StartingItem.option_random_challenge_mission:
-            pool = list(game_data.CHALLENGE_ITEM_NAMES)
-        elif choice == StartingItem.option_random_story_mission:
-            pool = story
-        elif choice == StartingItem.option_random_any_mission:
-            pool = list(game_data.MISSION_ITEM_NAMES) + story
-        elif choice == StartingItem.option_time_to_split:
-            pool = [game_data.STORY_ITEM_NAMES[0]]
-        else:
-            pool = list(game_data.MISSION_ITEM_NAMES)
-        self.starting_opener = self.random.choice(pool)
-        if self.progressive and self.starting_opener in game_data.STORY_ITEM_NAMES:
+        self.starting_openers = self.choose_starting_missions()
+        if self.progressive and self.starting_openers[0] in game_data.STORY_ITEM_NAMES:
             # Progressive levels open in order, so a story start is always the first level.
-            self.starting_opener = game_data.PROGRESSIVE_STORY_ITEM_NAME
-        self.multiworld.push_precollected(self.create_item(self.starting_opener))
+            self.starting_openers = [game_data.PROGRESSIVE_STORY_ITEM_NAME]
+        self.starting_opener = self.starting_openers[0]
+        for name in self.starting_openers:
+            self.multiworld.push_precollected(self.create_item(name))
         self.starting_character = self.random.choice(game_data.CHARACTER_ITEM_NAMES)
         self.multiworld.push_precollected(self.create_item(self.starting_character))
         # One weapon to start with: the custom weapon set menu needs at least one to offer.
@@ -394,17 +495,25 @@ class TsfpWorld(World):
 
     # ---- logic ----
 
+    def has_mission(self, state, mission) -> bool:
+        return state.has(mission.item_name, self.player)
+
     def has_story_level(self, state, level: int) -> bool:
         if self.progressive:
             if not state.has(game_data.PROGRESSIVE_STORY_ITEM_NAME, self.player, level + 1):
                 return False
         elif not state.has(game_data.STORY_ITEM_NAMES[level], self.player):
             return False
-        if level == game_data.FINAL_STORY_LEVEL and self.story_goal and not self.progressive:
-            # Future Perfect also waits for N other levels to be beaten. (With progressive items,
-            # owning Future Perfect already means owning all 12 others.)
+        if level == game_data.FINAL_STORY_LEVEL and self.story_goal:
+            # Future Perfect also waits for N other levels to be beaten (with progressive items,
+            # owning Future Perfect already means owning all 12 others) and N missions.
             others = game_data.STORY_ITEM_NAMES[:game_data.FINAL_STORY_LEVEL]
-            return state.has_from_list_unique(others, self.player, self.options.story_levels_required.value)
+            if not self.progressive and not state.has_from_list_unique(
+                    others, self.player, self.options.story_levels_required.value):
+                return False
+            needed = self.options.trophies_required.value
+            if needed and sum(1 for m in game_data.MISSIONS if self.has_mission(state, m)) < needed:
+                return False
         return True
 
     def create_regions(self) -> None:
@@ -428,7 +537,7 @@ class TsfpWorld(World):
 
             # Every mission needs only its own item: the client keeps both leagues open.
             entrance = menu.connect(region)
-            set_rule(entrance, lambda state, name=mission.item_name: state.has(name, self.player))
+            set_rule(entrance, lambda state, m=mission: self.has_mission(state, m))
 
         # Milestones: every mission of a group, a league or all Challenges, with a Bronze or better.
         milestones_on = {
@@ -441,8 +550,8 @@ class TsfpWorld(World):
             if not milestones_on[kind]:
                 continue
             menu.add_locations({name: location_id}, TsfpLocation)
-            needed = tuple(m.item_name for m in missions)
-            set_rule(self.get_location(name), lambda state, needed=needed: state.has_all(needed, self.player))
+            set_rule(self.get_location(name),
+                     lambda state, missions=missions: all(self.has_mission(state, m) for m in missions))
 
         hard = len(game_data.STORY_DIFFICULTIES) - 1
         for level in range(len(game_data.STORY_LEVELS)):
@@ -462,6 +571,11 @@ class TsfpWorld(World):
             if self.options.exclude_hard_story and game_data.story_location_name(level, hard) in locations:
                 self.get_location(game_data.story_location_name(level, hard)).progress_type = \
                     LocationProgressType.EXCLUDED
+            if self.story_excluded:
+                # Exclude Story Mode: anything but progression (useful items are still allowed).
+                for name, address in locations.items():
+                    if address is not None:
+                        self.get_location(name).item_rule = lambda item: not item.advancement
             entrance = menu.connect(region)
             set_rule(entrance, lambda state, k=level: self.has_story_level(state, k))
 
@@ -471,7 +585,8 @@ class TsfpWorld(World):
         else:
             menu.add_locations({game_data.TROPHY_GOAL_LOCATION_NAME: None}, TsfpLocation)
             victory = self.get_location(game_data.TROPHY_GOAL_LOCATION_NAME)
-            set_rule(victory, lambda state: state.has_all(game_data.MISSION_ITEM_NAMES, self.player))
+            hunted = game_data.hunted_missions(self.options.trophy_hunt_setting.value)
+            set_rule(victory, lambda state: all(self.has_mission(state, m) for m in hunted))
         victory.place_locked_item(self.create_item(game_data.VICTORY_ITEM_NAME))
 
     def create_items(self) -> None:
@@ -480,7 +595,8 @@ class TsfpWorld(World):
             names += [game_data.PROGRESSIVE_STORY_ITEM_NAME] * len(game_data.STORY_LEVELS)
         else:
             names += list(game_data.STORY_ITEM_NAMES)
-        names.remove(self.starting_opener)
+        for name in self.starting_openers:
+            names.remove(name)
         names += list(game_data.CHEAT_ITEM_NAMES)
         names += [n for n in game_data.WEAPON_ITEM_NAMES if n != self.starting_weapon]
         if self.options.score_multiplier == ScoreMultiplier.option_shuffle_all:
@@ -513,9 +629,14 @@ class TsfpWorld(World):
         if name == game_data.VICTORY_ITEM_NAME:
             return TsfpItem(name, ItemClassification.progression, None, self.player)
         if name in game_data.STORY_ITEM_NAMES or name == game_data.PROGRESSIVE_STORY_ITEM_NAME:
-            classification = ItemClassification.progression
+            # On the goal path for 1924 Future Perfect; for Trophy Hunt they only open more checks.
+            # (They stay progression even with Exclude Story Mode: logic needs them to reach those
+            # checks, which then only hold useful and filler items.)
+            classification = (ItemClassification.progression if self.story_goal
+                              else ItemClassification.progression_skip_balancing)
         elif name in game_data.MISSION_ITEM_NAMES:
-            classification = ItemClassification.progression_skip_balancing
+            classification = (ItemClassification.progression if name in self.hunted
+                              else ItemClassification.progression_skip_balancing)
         elif (name in game_data.CHEAT_ITEM_NAMES or name in game_data.WEAPON_BUFF_ITEM_NAMES
               or name in (game_data.SCORE_MULTIPLIER_ITEM_NAME, game_data.MISC_MULTIPLIER_ITEM_NAME,
                           game_data.STARTING_ARMOUR_ITEM_NAME)):
@@ -536,6 +657,11 @@ class TsfpWorld(World):
         return {
             "world_version": game_data.WORLD_VERSION,
             "starting_opener": self.starting_opener,
+            "starting_openers": list(self.starting_openers),
+            "trophies_required": int(self.options.trophies_required.value),
+            "trophies_required_grade": int(self.options.trophies_required_grade.value),
+            "trophy_hunt_setting": int(self.options.trophy_hunt_setting.value),
+            "exclude_story_mode": int(bool(self.options.exclude_story_mode)),
             "starting_character": self.starting_character,
             "starting_weapon": self.starting_weapon,
             "score_multiplier": int(self.options.score_multiplier.value),

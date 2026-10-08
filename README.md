@@ -30,7 +30,9 @@ https://discord.gg/M9cbCqc8sF
   Challenges Score Multiplier), and weapon buffs filling the leftover locations.
 * **Locations:** Bronze/Silver/Gold/Platinum trophies on every mission, story level completions per
   difficulty, story objectives, and optional group/league/all-Challenges milestones.
-* **Goals:** complete 1924 Future Perfect, or earn a chosen grade of trophy on every mission.
+* **Goals:** complete 1924 Future Perfect (optionally needing a number of story levels and trophies
+  first), or a Trophy Hunt: a chosen grade of trophy on every Arcade League mission, every Challenge,
+  or all 48.
 * **Easier trophies (optional):** easier times for Astro Jocks, Rumble In The Jungle and Electro Chimp
   Discomatic, and lower Platinum scores for the Cut-Out Shoot-Out Challenges.
 * **Death Link:** failing a mission sends a death; a death received fails the mission you are in.

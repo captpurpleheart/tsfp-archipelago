@@ -52,6 +52,9 @@ class TsfpContext(CommonContext):
         self.goal: int = game_data.GOAL_FUTURE_PERFECT
         self.story_levels_required: int = 0
         self.trophy_grade: int = 1
+        self.trophies_required: int = 0
+        self.trophies_required_grade: int = 1
+        self.trophy_hunt_setting: int = game_data.HUNT_ALL
         self.final_level_logged: Optional[bool] = None    # last "Future Perfect open?" written to the log
         self.misc_logged: tuple = ()                        # last Miscellaneous multiplier state logged
         self.score_logged: tuple = ()                       # last score multiplier state written to the log
@@ -119,6 +122,9 @@ class TsfpContext(CommonContext):
             self.goal = int(slot_data.get("goal", game_data.GOAL_FUTURE_PERFECT))
             self.story_levels_required = int(slot_data.get("story_levels_required", 0))
             self.trophy_grade = int(slot_data.get("trophy_grade", 1))
+            self.trophies_required = int(slot_data.get("trophies_required", 0))
+            self.trophies_required_grade = int(slot_data.get("trophies_required_grade", 1))
+            self.trophy_hunt_setting = int(slot_data.get("trophy_hunt_setting", game_data.HUNT_ALL))
             self.final_level_logged = None
             self.buffs_shown = None
             self.streamer_mode = bool(slot_data.get("streamer_mode", 0))
@@ -150,7 +156,7 @@ async def check_locations(ctx: TsfpContext, levels: dict[str, int], story: set[i
         await ctx.send_msgs([{"cmd": "LocationChecks", "locations": sorted(new)}])
 
     if ctx.goal == game_data.GOAL_ALL_TROPHIES:
-        goal = game_state.trophy_goal_reached(levels, ctx.trophy_grade)
+        goal = game_state.trophy_goal_reached(levels, ctx.trophy_grade, ctx.trophy_hunt_setting)
     else:
         goal = game_state.story_goal_reached(dolphin)
     if not ctx.victory_sent and goal:
@@ -230,18 +236,26 @@ def enforce_misc_score(ctx: TsfpContext, multiplier: int) -> None:
 
 
 def story_mask_for(ctx: TsfpContext) -> int:
-    """Which story levels are open right now: your items, plus the Future Perfect requirement."""
+    """Which story levels are open right now: your items, plus the 1924 Future Perfect requirements."""
     final_open = True
-    if ctx.goal == game_data.GOAL_FUTURE_PERFECT and ctx.story_levels_required > 0:
-        beaten = game_state.story_levels_beaten(dolphin)
-        final_open = beaten >= ctx.story_levels_required
+    if ctx.goal == game_data.GOAL_FUTURE_PERFECT and (ctx.story_levels_required or ctx.trophies_required):
+        levels_ok = game_state.story_levels_beaten(dolphin) >= ctx.story_levels_required
+        trophies = game_state.trophies_at_grade(game_state.read_trophy_levels(dolphin), ctx.trophies_required_grade)
+        trophies_ok = trophies >= ctx.trophies_required
+        final_open = levels_ok and trophies_ok
         if final_open != ctx.final_level_logged:
             ctx.final_level_logged = final_open
             name = game_data.STORY_LEVELS[game_data.FINAL_STORY_LEVEL]
+            needs = []
+            if ctx.story_levels_required:
+                needs.append(f"{ctx.story_levels_required} other story levels beaten")
+            if ctx.trophies_required:
+                grade = game_data.TIERS[ctx.trophies_required_grade - 1]
+                needs.append(f"{ctx.trophies_required} Arcade League missions or Challenges with {grade} or better")
             if final_open:
-                logger.info(f"{ctx.story_levels_required} story levels beaten: {name} opens once you have it.")
+                logger.info(f"Requirements met: {name} opens once you have it.")
             else:
-                logger.info(f"{name} needs {ctx.story_levels_required} other story levels beaten.")
+                logger.info(f"{name} needs " + " and ".join(needs) + ".")
     received = [item.item for item in ctx.items_received]
     return game_state.story_mask(received, ctx.story_mode == game_data.STORY_PROGRESSIVE, final_open)
 

@@ -3,9 +3,10 @@
 ## What does randomization do to this game?
 
 All 48 Arcade League missions and Challenges, all 13 story levels, all 150 characters, the 13
-cheats and 34 arcade weapons are locked until you receive them from the multiworld. Honorary and Elite League are open
-from the beginning, so any mission can be unlocked at any time. You start with one mission
-(chosen by the Starting Item option), one random character and one random weapon.
+cheats and 34 arcade weapons are locked until you receive them from the multiworld. All three
+Arcade Leagues are open from the beginning, so any mission can be unlocked at any time. You start
+with one or more missions (chosen by the Starting Mission options), one random character and one
+random weapon.
 
 Nothing unlocks the normal way any more. Beating a story level does not open the next one: if
 you do not have it, the game returns to the level select. Characters, cheats and weapons are
@@ -32,11 +33,13 @@ objective checks.
 
 Chosen in your options:
 
-* Future Perfect (default): complete 1924 Future Perfect on any difficulty. It opens once you
+* 1924 Future Perfect (default): complete 1924 Future Perfect on any difficulty. It opens once you
   have it AND have completed the chosen number of other story levels (0 to 12; Future Perfect
-  itself never counts). Completing it is the goal, not a check.
-* All Trophies: earn the chosen grade of trophy or better on all 48 missions. With this goal,
-  completing 1924 Future Perfect on each difficulty is three ordinary checks.
+  itself never counts) AND have the chosen number of Arcade League missions or Challenges at the
+  chosen trophy grade or better (0 to 48). Completing it is the goal, not a check.
+* Trophy Hunt: earn the chosen grade of trophy or better on every Arcade League mission, every
+  Challenge, or all 48. With this goal, completing 1924 Future Perfect on each difficulty is three
+  ordinary checks.
 
 ## Items
 
@@ -71,22 +74,36 @@ Chosen in your options:
 
 ## Options
 
-* Starting Item: a random Arcade League mission or Challenge (default), a random Arcade League
+**Game Options**
+* Starting Mission: a random Arcade League mission or Challenge (default), a random Arcade League
   mission, a random Challenge, a random story level, any of them, or Time To Split.
-* Story Mode Setting (individual levels or Progressive Story Level), Death Link, Streamer Mode
-* Goal, Story Levels Required For Goal, Trophy Grade Required For Goal
+* How Many Starting Arcade/Challenge Missions (1 to 5) for the random Arcade/Challenge choices.
+* Story Mode Status (individual levels or Progressive Story Level), Goal, Death Link, Streamer Mode.
+
+**Goal Options - 1924 Future Perfect** (only with that goal)
+* Story Levels Required To Access Goal, How Many Trophies Required To Access Goal, Minimum Grade
+  Of Trophy To Count.
+
+**Goal Options - Trophy Hunt** (only with that goal)
+* Trophy Hunt Goal Setting (all Arcade League missions, all Challenges, or all 48), Trophy Grade
+  Required For Goal, and Exclude Story Mode (story checks then only hold useful and filler items).
+
+**Difficulty Settings**
 * Exclude Hard Difficulty On Story Levels (on by default), Exclude All Platinum Trophies,
   Exclude Specific Platinum Trophies. Excluded locations only ever hold filler items.
 * Easier Astro Jocks (Platinum 2:15, Gold 2:30, Silver 3:00), Easier Rumble In The Jungle
   (Platinum 3:15), Easier Cut-Out Shoot-Out Platinum Scores (Hart Attack 1775, Come Hell Or High
-  Water 1700, Balls Of Steel 1200) and Quicker Electro Chimp Discomatic (Platinum 4:00, Gold 3:00, Silver 2:00,
-  Bronze 1:00). These change what the game asks for, while the client is connected and from the
-  next time the mission is loaded.
-* Bonus Items: Progressive Starting Armour, Progressive Behead The Undead Score Multipliers and
-  Progressive Miscellaneous Challenges Score Multipliers (each off, start with one, or shuffle
-  all), an option for each multiplier to make one an early item,
-  and Include Weapon Buffs.
-* Milestone Locations: four switches for the group, league and all-Challenges milestones.
+  Water 1700, Balls Of Steel 1200) and Quicker Electro Chimp Discomatic (Platinum 4:00, Gold 3:00,
+  Silver 2:00, Bronze 1:00). These change what the game asks for, while the client is connected
+  and from the next time the mission is loaded.
+
+**Bonus Items**
+* Progressive Starting Armour, Progressive Behead The Undead Score Multipliers and Progressive
+  Miscellaneous Challenges Score Multipliers (each off, start with one, or shuffle all), an option
+  for each multiplier to make one an early item, and Include Weapon Buffs.
+
+**Milestone Locations**
+* Four switches for the group, league and all-Challenges milestones.
 
 ## Streamer Mode
 With Streamer Mode on, the licensed song in the Disco map and the credits is replaced with "Like

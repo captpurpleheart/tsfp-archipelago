@@ -41,9 +41,14 @@ def milestone_location_ids(levels: dict[str, int]) -> set[int]:
     }
 
 
-def trophy_goal_reached(levels: dict[str, int], grade: int) -> bool:
-    """All Trophies goal: at least `grade` (1 Bronze ... 4 Platinum) on every mission."""
-    return all(levels.get(m.item_name, 0) >= grade for m in game_data.MISSIONS)
+def trophy_goal_reached(levels: dict[str, int], grade: int, hunt: int = game_data.HUNT_ALL) -> bool:
+    """Trophy Hunt goal: at least `grade` (1 Bronze ... 4 Platinum) on every hunted mission."""
+    return all(levels.get(m.item_name, 0) >= grade for m in game_data.hunted_missions(hunt))
+
+
+def trophies_at_grade(levels: dict[str, int], grade: int) -> int:
+    """How many missions have at least `grade`."""
+    return sum(1 for m in game_data.MISSIONS if levels.get(m.item_name, 0) >= grade)
 
 
 def check_conditions(mem) -> list[str]:

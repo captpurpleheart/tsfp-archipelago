@@ -24,7 +24,7 @@ UNLOCKS     The game decides whether something is unlocked by evaluating a small
 from dataclasses import dataclass
 
 GAME_NAME = "TimeSplitters Future Perfect"
-WORLD_VERSION = "1.0.0"     # keep in step with archipelago.json
+WORLD_VERSION = "1.1.0"     # keep in step with archipelago.json
 
 # The first 6 bytes of emulated memory (0x80000000) are the disc's game ID.
 GAME_ID_ADDRESS = 0x80000000
@@ -871,8 +871,20 @@ FILLER_ITEM_NAME = "Nothing"
 VICTORY_ITEM_NAME = "Victory"
 # Goal events (they have no ID: the client reports the goal itself).
 STORY_GOAL_LOCATION_NAME = f"{STORY_LEVELS[FINAL_STORY_LEVEL]} Completed"
-TROPHY_GOAL_LOCATION_NAME = "All Trophies"
-GOAL_FUTURE_PERFECT, GOAL_ALL_TROPHIES = 0, 1
+TROPHY_GOAL_LOCATION_NAME = "Trophy Hunt Completed"
+GOAL_FUTURE_PERFECT, GOAL_ALL_TROPHIES = 0, 1          # GOAL_ALL_TROPHIES is the Trophy Hunt goal
+# Trophy Hunt: which missions count.
+HUNT_ARCADE, HUNT_CHALLENGES, HUNT_ALL = 0, 1, 2
+
+
+def hunted_missions(setting: int) -> tuple["Mission", ...]:
+    if setting == HUNT_ARCADE:
+        return tuple(m for m in MISSIONS if m.prefix != "Challenge")
+    if setting == HUNT_CHALLENGES:
+        return tuple(m for m in MISSIONS if m.prefix == "Challenge")
+    return MISSIONS
+
+
 STORY_INDIVIDUAL, STORY_PROGRESSIVE = 0, 1
 
 
