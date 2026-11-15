@@ -443,55 +443,246 @@ def mission_name(mission) -> str:
     return game_data.STORY_LEVELS[what] if kind == "story" else what.name
 
 
-def ensure_death_hook(mem) -> str:
+def ensure_frame_hook(mem) -> str:
     """
-    Make the game able to fail the current mission on request. Returns 'ready', 'busy' (the
-    memory it needs is in use, e.g. by Dolphin's Gecko cheats) or 'unknown' (the game's data is
-    not what we expect). Nothing is changed unless the result is 'ready'.
+    Install the once-a-frame hook used by in-game announcements and Death Link: the game's table
+    entry for normal play points at the message code, which carries on into the Death Link code,
+    which carries on into the game's own. Returns 'ready', 'busy' (the memory it needs is in use,
+    e.g. by Dolphin's Gecko cheats) or 'unknown' (the game's data is not what we expect). Nothing
+    is changed unless the result is 'ready', except taking the entry back to the game's own.
     """
-    code = game_data.DEATH_CAVE_CODE
     entry = _read_word(mem, game_data.STATE_TABLE_PLAYING)
-    if entry not in (game_data.STATE_PLAYING_HANDLER, game_data.DEATH_CAVE):
+    if entry not in (game_data.STATE_PLAYING_HANDLER, game_data.DEATH_CAVE, game_data.MESSAGE_CAVE,
+                     game_data.OLD_MESSAGE_CAVE):
         return "unknown"
-    current = tuple(_read_word(mem, game_data.DEATH_CAVE + 4 * k) for k in range(len(code)))
-    trigger = _read_word(mem, game_data.DEATH_TRIGGER)
-    if current == code and trigger in (0, 1):
-        if entry != game_data.DEATH_CAVE:
-            mem.write_word(game_data.STATE_TABLE_PLAYING, game_data.DEATH_CAVE)
+    caves = ((game_data.DEATH_CAVE, game_data.DEATH_CAVE_CODE, game_data.DEATH_TRIGGER, (0, 1)),
+             (game_data.MESSAGE_CAVE, game_data.MESSAGE_CAVE_CODE, game_data.MESSAGE_STYLE,
+              tuple(range(14))))
+    states = []
+    for address, code, flag, flag_ok in caves:
+        current = tuple(_read_word(mem, address + 4 * k) for k in range(len(code)))
+        flag_value = _read_word(mem, flag)
+        if current == code and flag_value in flag_ok:
+            states.append("ours")
+        elif not any(current) and not flag_value:
+            states.append("empty")
+        else:
+            states.append("busy")
+    if states == ["ours", "ours"]:
+        if entry != game_data.MESSAGE_CAVE:
+            mem.write_word(game_data.STATE_TABLE_PLAYING, game_data.MESSAGE_CAVE)
         return "ready"
-    if entry == game_data.DEATH_CAVE:              # never leave the game pointed at something else
+    if entry != game_data.STATE_PLAYING_HANDLER:    # never leave the game pointed at something else
         mem.write_word(game_data.STATE_TABLE_PLAYING, game_data.STATE_PLAYING_HANDLER)
-    if any(current) or trigger:
+    if "busy" in states:
         return "busy"
-    for k, value in enumerate(code):
-        mem.write_word(game_data.DEATH_CAVE + 4 * k, value)
-    mem.write_word(game_data.STATE_TABLE_PLAYING, game_data.DEATH_CAVE)
+    mem.write_word(game_data.MESSAGE_DELAY, 0)
+    mem.write_word(game_data.MESSAGE_COOLDOWN, 0)
+    for (address, code, _flag, _ok), state in zip(caves, states):
+        if state == "empty":
+            for k, value in enumerate(code):
+                mem.write_word(address + 4 * k, value)
+    mem.write_word(game_data.STATE_TABLE_PLAYING, game_data.MESSAGE_CAVE)
     return "ready"
 
 
+ensure_death_hook = ensure_frame_hook          # the name older code used
+
+
+def encode_message(text: str) -> bytes:
+    """Plain ASCII the game's font can show, cut to fit, ending in a zero byte."""
+    clean = "".join(ch if " " <= ch <= "~" else "?" for ch in text)
+    if len(clean) > game_data.MESSAGE_TEXT_MAX:
+        clean = clean[:game_data.MESSAGE_TEXT_MAX - 3] + "..."
+    return clean.encode("ascii") + b"\0"
+
+
+def message_on_screen(mem, style: int) -> bool:
+    """True while a message of this style (ours or the game's) is still being shown."""
+    size = game_data.MESSAGE_ENTRY_SIZE
+    data = mem.read_bytes(game_data.MESSAGE_QUEUE, size * game_data.MESSAGE_QUEUE_ENTRIES)
+    for k in range(game_data.MESSAGE_QUEUE_ENTRIES):
+        entry = data[k * size:(k + 1) * size]
+        if struct.unpack_from(">I", entry, 0)[0] != style:
+            continue
+        timer, stage_1, stage_2 = (struct.unpack_from(">f", entry, offset)[0] for offset in (
+            game_data.MESSAGE_ENTRY_TIMER, game_data.MESSAGE_ENTRY_STAGE_1, game_data.MESSAGE_ENTRY_STAGE_2))
+        lasts = stage_1 + stage_2
+        if not (-60.0 < timer < 1e6 and 0.0 < lasts < 60.0):     # not a sane entry: ignore it
+            continue
+        if timer < lasts + game_data.MESSAGE_SPARE_SECONDS:
+            return True
+    return False
+
+
+class Announcer:
+    """
+    Shows messages in game, one at a time, while you are playing. Messages that arrive while you
+    are not in a mission (menus, loading) are dropped; while the game is paused they wait.
+    """
+
+    def __init__(self) -> None:
+        from collections import deque
+        self.queue = deque(maxlen=30)
+
+    def add(self, text: str, style: int = game_data.MESSAGE_STYLE_LINE) -> None:
+        self.queue.append((text, style))
+
+    def poll(self, mem, hook_ready: bool) -> None:
+        playing = _read_word(mem, game_data.GAME_STATE) == game_data.GAME_STATE_PLAYING
+        if not playing:
+            self.queue.clear()
+            if hook_ready and _read_word(mem, game_data.MESSAGE_STYLE):
+                mem.write_word(game_data.MESSAGE_STYLE, 0)
+            return
+        if not hook_ready or not self.queue or _read_word(mem, game_data.MESSAGE_STYLE):
+            return                                   # the game hasn't taken the last one yet
+        text, style = self.queue[0]
+        if message_on_screen(mem, style):
+            return                                   # wait for it to finish (it waits while paused too)
+        self.queue.popleft()
+        mem.write_bytes(game_data.MESSAGE_TEXT, encode_message(text))
+        mem.write_word(game_data.MESSAGE_STYLE, style)
+
+
+def ensure_award_hook(mem) -> str:
+    """
+    Rewrite the award screen's eight calls to the client's order (see game_data). Returns 'ready',
+    'busy' (the memory is in use, e.g. by Dolphin's cheats) or 'unknown' (the game's code is not
+    what we expect). Only works if done before the game first runs that code after booting.
+    """
+    hooks = [(site, original, ours, _read_word(mem, site)) for site, original, ours in game_data.AWARD_HOOKS]
+    if any(now not in (original, ours) for _s, original, ours, now in hooks):
+        return "unknown"
+    size = 4 * len(game_data.AWARD_CAVE_CODE)
+    code = mem.read_bytes(game_data.AWARD_CAVE, size)
+    cave_ours = code == b"".join(w.to_bytes(4, "big") for w in game_data.AWARD_CAVE_CODE)
+    if cave_ours and all(now == ours for _s, _o, ours, now in hooks):
+        return "ready"
+    if not cave_ours:
+        for site, original, _ours, now in hooks:       # never call into code that isn't there
+            if now != original:
+                mem.write_word(site, original)
+        if any(mem.read_bytes(game_data.AWARD_CAVE, game_data.AWARD_END - game_data.AWARD_CAVE)):
+            return "busy"
+        for k, value in enumerate(game_data.AWARD_CAVE_CODE):
+            mem.write_word(game_data.AWARD_CAVE + 4 * k, value)
+    for site, _original, ours, _now in hooks:
+        mem.write_word(site, ours)
+    return "ready"
+
+
+def _award_text(text: str, limit: int) -> bytes:
+    raw = "".join(c if 32 <= ord(c) < 127 else "?" for c in text)
+    if len(raw) > limit:
+        raw = raw[:limit - 3] + "..."
+    return raw.encode("ascii") + b"\0"
+
+
+class AwardScreen:
+    """
+    The entries the client adds to the award screen after a mission. Everything found or received
+    is kept until an award screen has shown it; what that screen showed is cleared when the next
+    mission starts. Things that arrive after it (e.g. in the menus) wait for the next one.
+    """
+
+    def __init__(self) -> None:
+        # In the order they happened: location IDs we checked, and NetworkItems other players sent us.
+        self.found: list = []
+        self.written: tuple = ()
+        self.was_playing = False
+        self.in_memory: list = []      # the found list that the entries in the game's memory came from
+        self.shown: list = []          # what the last award screen showed
+
+    def clear(self) -> None:
+        self.found = []
+
+    def poll(self, mem, hook_ready: bool, front: list[tuple[str, str]], back: list[tuple[str, str]]) -> None:
+        """front: (heading, name) lines shown before the game's own entries; back: after them."""
+        if not hook_ready:
+            self.written = ()
+            return
+        if _read_word(mem, game_data.AWARD_SHOWN):       # the game built its list since the last look
+            mem.write_word(game_data.AWARD_SHOWN, 0)
+            self.shown = self.in_memory
+        playing = _read_word(mem, game_data.GAME_STATE) == game_data.GAME_STATE_PLAYING
+        if playing and not self.was_playing and self.shown:
+            remaining = list(self.found)                 # a new mission: forget what was shown
+            for item in self.shown:
+                if item in remaining:
+                    remaining.remove(item)
+            self.found, self.shown = remaining, []
+            self.written = ()
+            self.in_memory = []
+            front, back = [], []                         # the client works out the rest next time
+        else:
+            self.in_memory = list(self.found)
+        self.was_playing = playing
+        front = front[:game_data.AWARD_MAX]
+        back = back[:game_data.AWARD_MAX - len(front)]
+        table = _read_word(mem, game_data.AWARD_TEXT_TABLE)
+        if table == 0 or table % 4:
+            front, back = [], []
+        entries = front + back
+        wanted = (table, tuple(front), tuple(back))
+        if wanted == self.written and _read_word(mem, game_data.AWARD_COUNT) == len(entries):
+            return
+        mem.write_word(game_data.AWARD_COUNT, 0)
+        for k, (heading, name) in enumerate(entries):
+            heading_text = game_data.AWARD_HEADING_TEXT + 32 * k
+            name_text = game_data.AWARD_NAME_TEXT + 64 * k
+            pointers = game_data.AWARD_POINTERS + 8 * k
+            mem.write_bytes(heading_text, _award_text(heading, game_data.AWARD_HEADING_MAX))
+            mem.write_bytes(name_text, _award_text(name, game_data.AWARD_NAME_MAX))
+            mem.write_word(pointers, heading_text)
+            mem.write_word(pointers + 4, name_text)
+            mem.write_word(game_data.AWARD_ENTRIES + 8 * k, game_data.award_text_id(table, pointers))
+            mem.write_word(game_data.AWARD_ENTRIES + 8 * k + 4, game_data.award_text_id(table, pointers + 4))
+        mem.write_word(game_data.AWARD_FRONT_COUNT, len(front))
+        mem.write_word(game_data.AWARD_COUNT, len(entries))
+        self.written = wanted
+
+
 class MissionFailure:
-    """Notices the game failing a mission, and can make it fail the one being played."""
+    """
+    Notices the game failing a mission, and can kill the player in the one being played (for a
+    Death Link received). A kill we caused, and the failure or respawn that follows it, are never
+    reported as the player's own.
+    """
 
     def __init__(self) -> None:
         self.armed = False        # a mission is being played and has not failed yet
-        self.caused = False       # the next failure is one we asked for
+        self.caused = False       # the player's current death (and any failure from it) is ours
         self.waiting = 0          # polls left for the game to act on our request
+
+    def _life(self, mem):
+        pointer = _read_word(mem, game_data.PLAYER_STATE_POINTER)
+        if not game_data.RAM_START <= pointer < game_data.RAM_END - 0x100:
+            return None
+        return _read_word(mem, pointer + game_data.PLAYER_LIFE_OFFSET)
 
     def poll(self, mem):
         """Call every 0.25 s. Returns the mission's name when it has just failed by itself."""
         if self.waiting:
             self.waiting -= 1
-            if not self.waiting and _read_word(mem, game_data.DEATH_TRIGGER):   # the game never took it
+            if _read_word(mem, game_data.DEATH_TRIGGER) == 0:
+                self.waiting = 0                                   # the game has acted on it
+            elif not self.waiting:                                 # the game never took it
                 mem.write_word(game_data.DEATH_TRIGGER, 0)
                 self.caused = False
         mission = current_mission(mem)
+        game = _read_word(mem, game_data.GAME_STATE)
         if mission is None:
-            self.armed = False
+            self.armed = self.caused = False
             return None
         failed = _read_word(mem, game_data.SETUP_FLAGS_54) & game_data.SETUP_FAILED_FLAG
         if not failed:
-            if _read_word(mem, game_data.GAME_STATE) == game_data.GAME_STATE_PLAYING:
+            if game == game_data.GAME_STATE_PLAYING:
                 self.armed = True
+                if self.caused and not self.waiting and self._life(mem) == game_data.PLAYER_ALIVE:
+                    self.caused = False                            # respawned (Arcade League)
+            elif game == game_data.GAME_STATE_LOADING:
+                self.caused = False                                # a restart
             return None
         if not self.armed:
             return None
@@ -502,16 +693,53 @@ class MissionFailure:
         return mission_name(mission)
 
     def fail(self, mem):
-        """Fail the mission being played. Returns its name, or None when there is nothing to fail."""
+        """Kill the player in the mission being played. Returns its name, or None when there is
+        nothing to do (not in a mission, paused in a menu, already dead...)."""
         mission = current_mission(mem)
         if (mission is None or not self.armed or self.caused
                 or _read_word(mem, game_data.GAME_STATE) != game_data.GAME_STATE_PLAYING
-                or ensure_death_hook(mem) != "ready"):
+                or self._life(mem) != game_data.PLAYER_ALIVE
+                or ensure_frame_hook(mem) != "ready"):
             return None
         mem.write_word(game_data.DEATH_TRIGGER, 1)
         self.caused = True
         self.waiting = game_data.DEATH_TRIGGER_POLLS
         return mission_name(mission)
+
+
+class ArcadeDeaths:
+    """Counts the player's deaths in the Arcade League mission being played (restarts start again)."""
+
+    def __init__(self) -> None:
+        self.mission = None
+        self.deaths = 0
+        self.dead = False
+
+    def poll(self, mem):
+        """Call every 0.25 s. Returns (mission name, deaths so far) when the player has just died in
+        an Arcade League mission, else None."""
+        game = _read_word(mem, game_data.GAME_STATE)
+        mission = current_mission(mem)
+        if (game == game_data.GAME_STATE_LOADING or mission is None or mission[0] != "mission"
+                or mission[1].prefix == "Challenge"):
+            self.mission, self.deaths, self.dead = None, 0, False
+            return None
+        if mission[1] is not self.mission:
+            self.mission, self.deaths, self.dead = mission[1], 0, False
+        pointer = _read_word(mem, game_data.PLAYER_STATE_POINTER)
+        if game != game_data.GAME_STATE_PLAYING or not game_data.RAM_START <= pointer < game_data.RAM_END - 0x100:
+            return None
+        life = _read_word(mem, pointer + game_data.PLAYER_LIFE_OFFSET)
+        if _read_word(mem, game_data.SETUP_FLAGS_54) & game_data.SETUP_FAILED_FLAG:
+            self.dead = self.dead or life == game_data.PLAYER_DEAD    # a failed mission isn't a death
+            return None
+        if life == game_data.PLAYER_ALIVE:
+            self.dead = False
+        elif life == game_data.PLAYER_DEAD and not self.dead:
+            self.dead = True
+            self.deaths += 1
+            return mission_name(mission), self.deaths
+        return None
 
 
 # ---- Progressive Starting Armour ----

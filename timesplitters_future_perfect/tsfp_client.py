@@ -11,7 +11,7 @@ import traceback
 from typing import Any, Optional
 
 import Utils
-from CommonClient import get_base_parser, gui_enabled, logger, server_loop
+from CommonClient import ClientCommandProcessor, get_base_parser, gui_enabled, logger, server_loop
 from NetUtils import ClientStatus
 
 import dolphin_memory_engine as dolphin
@@ -33,13 +33,54 @@ LOST = "Dolphin connection was lost. Start Dolphin and the game, then wait."
 WRONG_GAME = "Dolphin is running a different game. Load TimeSplitters: Future Perfect."
 
 
+ANNOUNCE_SETTINGS = ("received", "sent", "found", "deathlink", "filler")
+ANNOUNCE_DEFAULTS = {"on": True, **{name: True for name in ANNOUNCE_SETTINGS}}
+
+
+class TsfpCommandProcessor(getattr(CommonContext, "command_processor", ClientCommandProcessor)):
+    def _cmd_announce(self, setting: str = "", value: str = "") -> bool:
+        """In-game announcements. /announce shows the settings. /announce on or /announce off switches
+        them all. /announce received|sent|found|deathlink|filler on|off switches one kind
+        (filler: announcements of filler items)."""
+        ctx = self.ctx
+        setting, value = setting.lower(), value.lower()
+        if setting in ("on", "off") and not value:
+            setting, value = "on", setting
+        if setting and (setting not in ("on",) + ANNOUNCE_SETTINGS or value not in ("on", "off")):
+            self.output("Use /announce on|off, or /announce received|sent|found|deathlink|filler on|off.")
+            return False
+        if setting:
+            ctx.announce[setting] = value == "on"
+            try:
+                Utils.persistent_store("timesplitters_future_perfect", "announce", dict(ctx.announce))
+            except Exception:
+                pass
+        self.output("In-game announcements: " + ("ON" if ctx.announce["on"] else "OFF") + " ("
+                    + ", ".join(f"{name} {'on' if ctx.announce[name] else 'off'}" for name in ANNOUNCE_SETTINGS)
+                    + ")")
+        return True
+
+
 class TsfpContext(CommonContext):
     game = game_data.GAME_NAME
     items_handling = 0b111  # the server sends us every item, including our own
+    command_processor = TsfpCommandProcessor
 
     def __init__(self, server_address: Optional[str], password: Optional[str]) -> None:
         super().__init__(server_address, password)
         self.dolphin_status: str = NOT_CONNECTED
+        self.announcer = game_state.Announcer()
+        self.announce: dict[str, bool] = dict(ANNOUNCE_DEFAULTS)
+        try:
+            saved = Utils.persistent_load().get("timesplitters_future_perfect", {}).get("announce", {})
+            self.announce.update({k: bool(v) for k, v in saved.items() if k in ANNOUNCE_DEFAULTS})
+        except Exception:
+            pass
+        self.frame_hook_logged: str = ""
+        self.award_screen = game_state.AwardScreen()
+        self.award_hook_logged: str = ""
+        self.award_items_seen: Optional[int] = None         # items_received already looked at
+        self.last_played = None                             # ("mission", Mission) / ("story", level)
         self.dolphin_sync_task: Optional[asyncio.Task] = None
         self.reported_locations: set[int] = set()  # sent already, server may not have confirmed yet
         self.items_synced: bool = False             # True once the server has sent our item list
@@ -69,6 +110,8 @@ class TsfpContext(CommonContext):
         self.easier_trophies: dict[str, bool] = {}          # from slot_data
         self.easier_logged: dict[str, str] = {}
         self.armour_logged: int = 0                         # starting armour level last written to the log
+        self.arcade_deaths = game_state.ArcadeDeaths()
+        self.death_link_amnesty: int = 0                    # 0 = Arcade League deaths don't count
         self.death_pending: bool = False                    # a Death Link has arrived and not been dealt with
         self.death_hook_logged: str = ""
         self.objective_tracker = game_state.ObjectiveTracker()
@@ -102,6 +145,38 @@ class TsfpContext(CommonContext):
     def on_deathlink(self, data: dict[str, Any]) -> None:
         super().on_deathlink(data)
         self.death_pending = True
+        if self.announce["on"] and self.announce["deathlink"]:
+            cause = str(data.get("cause") or "") or f"Death Link from {data.get('source', 'someone')}"
+            self.announcer.add(cause, game_data.MESSAGE_STYLE_BIG)
+
+    def announce_item_send(self, args: dict[str, Any]) -> None:
+        """Queue an in-game line for an item that concerns us (received, sent or found)."""
+        if not self.announce["on"] or self.slot is None:
+            return
+        item, receiving = args.get("item"), args.get("receiving")
+        if item is None or receiving is None:
+            return
+        if isinstance(item, dict):
+            item_id, sender, flags = item.get("item"), item.get("player"), item.get("flags", 0)
+        else:
+            item_id, sender, flags = item.item, item.player, item.flags
+        if not flags and not self.announce["filler"]:
+            return
+        try:
+            name = self.item_names.lookup_in_slot(item_id, receiving)
+        except Exception:
+            name = f"item {item_id}"
+        players = self.player_names
+        if receiving == self.slot and sender == self.slot:
+            kind, text = "found", f"Found {name}"
+        elif receiving == self.slot:
+            kind, text = "received", f"Received {name} from {players.get(sender, 'someone')}"
+        elif sender == self.slot:
+            kind, text = "sent", f"Sent {name} to {players.get(receiving, 'someone')}"
+        else:
+            return
+        if self.announce[kind]:
+            self.announcer.add(text, game_data.MESSAGE_STYLE_LINE)
 
     def make_gui(self):
         """The normal client window (or Universal Tracker's), plus a Weapon Buffs tab."""
@@ -117,6 +192,7 @@ class TsfpContext(CommonContext):
     def on_package(self, cmd: str, args: dict[str, Any]) -> None:
         if cmd == "Connected":
             self.connected_at = time.monotonic()
+            self.award_items_seen = None       # items already received are not news
             slot_data = args.get("slot_data", {})
             self.story_mode = int(slot_data.get("story_mode", game_data.STORY_INDIVIDUAL))
             self.goal = int(slot_data.get("goal", game_data.GOAL_FUTURE_PERFECT))
@@ -130,19 +206,32 @@ class TsfpContext(CommonContext):
             self.streamer_mode = bool(slot_data.get("streamer_mode", 0))
             self.easier_trophies = {option: bool(slot_data.get(option, 0)) for option in game_data.EASIER_TROPHIES}
             Utils.async_start(self.update_death_link(bool(slot_data.get("death_link", 0))))
+            self.death_link_amnesty = int(slot_data.get("death_link_amnesty", 0))   # 0: seeds before 1.3.0
+            logger.info("In-game announcements are " + ("on" if self.announce["on"] else "off")
+                        + ". Type /announce to see or change them.")
             seed_version = str(slot_data.get("world_version", "unknown"))
             if seed_version == game_data.WORLD_VERSION:
                 logger.info(f"This game was generated with apworld {seed_version}, the same as this client.")
+            elif seed_version.split(".")[:2] == game_data.WORLD_VERSION.split(".")[:2]:
+                logger.info(f"This game was generated with apworld {seed_version}; this client is "
+                            f"{game_data.WORLD_VERSION}, a fix for the same version, so nothing is missing.")
             else:
                 logger.warning(f"This game was generated with apworld {seed_version}, but this client is "
                                f"{game_data.WORLD_VERSION}. Items added since {seed_version} are not in this game; "
                                "generate a new one to get them.")
+            # What is at each of our locations, so the award screen can name what was just found.
+            missing = sorted(args.get("missing_locations", []))
+            if missing:
+                Utils.async_start(self.send_msgs([{"cmd": "LocationScouts", "locations": missing,
+                                                   "create_as_hint": 0}]))
             seed = f"{self.seed_name}/{self.slot}"
             if self.objectives_seed not in (None, seed):   # a different game: forget the old one's objectives
                 self.objectives_found = set()
             self.objectives_seed = seed
         elif cmd == "ReceivedItems":
             self.items_synced = True
+        elif cmd == "PrintJSON" and args.get("type") in ("ItemSend", "ItemCheat"):
+            self.announce_item_send(args)
         super().on_package(cmd, args)      # Universal Tracker listens to the same messages
 
 
@@ -153,6 +242,7 @@ async def check_locations(ctx: TsfpContext, levels: dict[str, int], story: set[i
     new = found - set(ctx.checked_locations) - ctx.reported_locations
     if new:
         ctx.reported_locations |= new
+        ctx.award_screen.found.extend(sorted(new))
         await ctx.send_msgs([{"cmd": "LocationChecks", "locations": sorted(new)}])
 
     if ctx.goal == game_data.GOAL_ALL_TROPHIES:
@@ -191,30 +281,173 @@ def enforce_score(ctx: TsfpContext, multiplier: int) -> None:
         logger.info(f"Behead The Undead points are now x{multiplier}.")
 
 
-async def death_link(ctx: TsfpContext) -> None:
+_ITEM_ID_TO_NAME = {code: name for name, code in game_data.ITEM_NAME_TO_ID.items()}
+_MISSIONS_BY_ITEM = {m.item_name: m for m in game_data.MISSIONS}
+_BUFFS_BY_ITEM = {game_data.weapon_buff_item_name(b[0], b[1], b[4]): f"{b[0]} {round(b[4] * 100)}% {b[1]}"
+                  for b in game_data.WEAPON_BUFFS}
+_NATIVE_AWARDS = (set(game_data.CHARACTER_ITEM_NAMES) | set(game_data.CHEAT_ITEM_NAMES)
+                  | set(game_data.WEAPON_ITEM_NAMES) | {game_data.FILLER_ITEM_NAME})
+
+
+# Where each kind of entry goes on the award screen. The game's own entries (characters, weapons,
+# cheats, ...) come between the two groups.
+_FRONT_ORDER = (game_data.AWARD_STORY, game_data.AWARD_MISSION, game_data.AWARD_CHALLENGE)
+_BACK_ORDER = (game_data.AWARD_ITEM, game_data.AWARD_BUFF)
+
+
+def _other_player_rank(flags: int) -> int:
+    """Progression, then useful, then traps, then filler."""
+    if flags & 0b001:
+        return 0
+    if flags & 0b010:
+        return 1
+    if flags & 0b100:
+        return 2
+    return 3
+
+
+def award_entries(ctx: TsfpContext) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """The award screen lines for the items found or received since the last award screen, as
+    (lines before the game's own entries, lines after them). Characters, cheats and weapons are left
+    out: the game lists those itself once they unlock."""
+    entries: list[tuple[tuple[str, str], tuple]] = []      # (line, sort key)
+    progressive: list[int] = []          # positions of Progressive Story Level entries
+    for order, found in enumerate(ctx.award_screen.found):
+        if isinstance(found, int):          # one of our locations: what is there
+            item = ctx.locations_info.get(found)
+            if item is None:
+                continue
+            receiver = item.player          # a NetworkItem for a location names who it is for
+        else:                               # an item another player sent us
+            item, receiver = found, ctx.slot
+        if receiver != ctx.slot:
+            try:
+                name = ctx.item_names.lookup_in_slot(item.item, item.player)
+            except Exception:
+                name = "Unknown item"
+            player = ctx.player_names.get(item.player, "Someone")
+            entries.append(((game_data.AWARD_OTHER_PLAYER.format(player=player), name),
+                            (1, len(_BACK_ORDER) + _other_player_rank(item.flags), order)))
+            continue
+        name = _ITEM_ID_TO_NAME.get(item.item, "")
+        if not name or name in _NATIVE_AWARDS:
+            continue
+        if name in game_data.STORY_ITEM_NAMES:
+            level = game_data.STORY_ITEM_NAMES.index(name)
+            if ctx.last_played == ("story", level):
+                continue                    # you have just played it, so you know you have it
+            line = (game_data.AWARD_STORY, game_data.STORY_LEVEL_DATA[level][1])
+        elif name == game_data.PROGRESSIVE_STORY_ITEM_NAME:
+            progressive.append(len(entries))
+            line = (game_data.AWARD_STORY, "")
+        elif name in _MISSIONS_BY_ITEM:
+            mission = _MISSIONS_BY_ITEM[name]
+            if ctx.last_played == ("mission", mission):
+                continue
+            heading = game_data.AWARD_CHALLENGE if mission.prefix == "Challenge" else game_data.AWARD_MISSION
+            line = (heading, mission.name)
+        elif name in _BUFFS_BY_ITEM:
+            line = (game_data.AWARD_BUFF, _BUFFS_BY_ITEM[name])
+        else:
+            line = (game_data.AWARD_ITEM, name)
+        heading = line[0]
+        key = (0, _FRONT_ORDER.index(heading), order) if heading in _FRONT_ORDER \
+            else (1, _BACK_ORDER.index(heading), order)
+        entries.append((line, key))
+    if progressive:
+        # The level each one opened: the last ones received, counting the ones still on their way.
+        progressive_id = game_data.ITEM_NAME_TO_ID[game_data.PROGRESSIVE_STORY_ITEM_NAME]
+        received = sum(1 for item in ctx.items_received if item.item == progressive_id)
+        first = received - len(progressive)
+        last = len(game_data.STORY_LEVELS) - 1
+        for k, position in enumerate(progressive):
+            level = min(max(first + k, 0), last)
+            line = None if ctx.last_played == ("story", level) else \
+                (game_data.AWARD_STORY, game_data.STORY_LEVEL_DATA[level][1])
+            entries[position] = (line, entries[position][1])
+    entries = [entry for entry in entries if entry[0] is not None]
+    entries.sort(key=lambda entry: entry[1])
+    front = [line for line, key in entries if key[0] == 0]
+    back = [line for line, key in entries if key[0] == 1]
+    return front, back
+
+
+def note_received_items(ctx: TsfpContext) -> None:
+    """Add items other players have sent since the last look to the award list. Items already
+    received when the client connects are not listed; our own items come with our locations."""
+    if ctx.slot is None or not ctx.items_ready():
+        return
+    count = len(ctx.items_received)
+    if ctx.award_items_seen is None or count < ctx.award_items_seen:
+        ctx.award_items_seen = count
+        return
+    for item in ctx.items_received[ctx.award_items_seen:]:
+        if item.player != ctx.slot:
+            ctx.award_screen.found.append(item)
+    ctx.award_items_seen = count
+
+
+def award_hook(ctx: TsfpContext) -> bool:
+    """Install the award screen hook as early as possible; True when ready."""
+    state = game_state.ensure_award_hook(dolphin)
+    if state != ctx.award_hook_logged:
+        ctx.award_hook_logged = state
+        if state == "busy":
+            logger.error("Archipelago items will NOT show on the award screen: the memory they need is in "
+                         "use. Turn off Gecko/cheat codes in Dolphin (Config > General > Enable Cheats) and "
+                         "restart the game.")
+        elif state == "unknown":
+            logger.error("Archipelago items will NOT show on the award screen: the game's code is not what "
+                         "the client expects.")
+    return state == "ready"
+
+
+def frame_hook(ctx: TsfpContext) -> bool:
+    """Install the once-a-frame hook (announcements and receiving Death Links); True when ready."""
+    state = game_state.ensure_frame_hook(dolphin)
+    if state != ctx.frame_hook_logged:
+        ctx.frame_hook_logged = state
+        if state == "busy":
+            logger.error("In-game announcements and receiving Death Links are NOT available: the memory they "
+                         "need is in use. Turn off Gecko/cheat codes in Dolphin (Config > General > Enable "
+                         "Cheats) and restart the game.")
+        elif state == "unknown":
+            logger.error("In-game announcements and receiving Death Links are NOT available: the game's data "
+                         "is not what the client expects.")
+    return state == "ready"
+
+
+async def death_link(ctx: TsfpContext, hook_ready: bool) -> None:
     """Send a Death Link when a mission fails; fail the mission being played when one arrives."""
     failed = ctx.mission_failure.poll(dolphin)
+    died = ctx.arcade_deaths.poll(dolphin)
+    if ctx.death_link_amnesty <= 0 or ctx.mission_failure.caused or ctx.mission_failure.waiting:
+        died = None                     # off for this seed, or the death came from a Death Link we received
     enabled = ctx.slot is not None and "DeathLink" in ctx.tags
     if not enabled:
         ctx.death_pending = False
         return
-    state = game_state.ensure_death_hook(dolphin)
-    if state != ctx.death_hook_logged:
-        ctx.death_hook_logged = state
-        if state == "busy":
-            logger.error("Death Link can be sent but NOT received: the memory it needs is in use. Turn off "
-                         "Gecko/cheat codes in Dolphin (Config > General > Enable Cheats) and restart the game.")
-        elif state == "unknown":
-            logger.error("Death Link can be sent but NOT received: the game's data is not what the client expects.")
+    if died and not failed and died[1] % ctx.death_link_amnesty == 0:
+        mission, deaths = died
+        name = ctx.player_names.get(ctx.slot, "A player")
+        if ctx.death_link_amnesty == 1:
+            logger.info(f"You died in {mission}: Death Link sent.")
+            await ctx.send_death(f"{name} died in {mission}.")
+        else:
+            logger.info(f"You died {deaths} times in {mission}: Death Link sent.")
+            await ctx.send_death(f"{name} died {deaths} times in {mission}.")
+    elif died:
+        left = ctx.death_link_amnesty - died[1] % ctx.death_link_amnesty
+        logger.info(f"You died in {died[0]}: {left} more death{'s' if left != 1 else ''} until a Death Link is sent.")
     if failed:
         name = ctx.player_names.get(ctx.slot, "A player")
         logger.info(f"You failed {failed}: Death Link sent.")
         await ctx.send_death(f"{name} failed {failed}.")
     if ctx.death_pending:
         ctx.death_pending = False
-        target = ctx.mission_failure.fail(dolphin)
-        logger.info(f"Death Link received: {target} failed." if target
-                    else "Death Link received, but you are not in a mission, so nothing happened.")
+        target = ctx.mission_failure.fail(dolphin) if hook_ready else None
+        logger.info(f"Death Link received: you died in {target}." if target
+                    else "Death Link received, but you are not playing a mission, so nothing happened.")
 
 
 def enforce_misc_score(ctx: TsfpContext, multiplier: int) -> None:
@@ -276,7 +509,13 @@ async def dolphin_sync_task(ctx: TsfpContext) -> None:
                             logger.info(f"Starting armour is now {armour_level * 25}% "
                                         f"({armour_level} of {game_data.STARTING_ARMOUR_COPIES}).")
                 ctx.starting_armour.poll(dolphin, armour_level)
-                await death_link(ctx)
+                hook_ready = ctx.slot is not None and frame_hook(ctx)
+                ctx.announcer.poll(dolphin, hook_ready)
+                note_received_items(ctx)
+                if game_state._read_word(dolphin, game_data.GAME_STATE) == game_data.GAME_STATE_PLAYING:
+                    ctx.last_played = game_state.current_mission(dolphin) or ctx.last_played
+                ctx.award_screen.poll(dolphin, award_hook(ctx), *(award_entries(ctx) if ctx.slot is not None else ([], [])))
+                await death_link(ctx, hook_ready)
                 # Objectives can only be seen at the moment they complete, so watch them even
                 # while the server connection is down; they are sent as soon as it is back.
                 ctx.objectives_found |= ctx.objective_tracker.poll(dolphin)

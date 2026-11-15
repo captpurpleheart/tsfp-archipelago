@@ -261,6 +261,30 @@ class StartingArmour(Choice):
     default = 2
 
 
+class TsfpDeathLink(DeathLink):
+    """
+    When you fail a mission, everyone else with Death Link on dies; when they die, you die in the
+    mission you are playing (which fails it in Story and Challenges; in Arcade League you respawn).
+    Failing means dying in a Story level, failing a Story objective, or failing
+    an Arcade League mission or Challenge (finishing below Bronze counts). In Arcade League
+    missions you respawn, so deaths there are counted with Death Link Amnesty instead.
+    """
+    display_name = "Death Link"
+
+
+class DeathLinkAmnesty(Range):
+    """
+    Arcade League missions only: how many times you can die in one mission before a Death Link is
+    sent (1 = every death). The count starts again with every mission, including a restart.
+    Story Mode and Challenges are not affected: there a death fails the mission, and a failed
+    mission always sends a Death Link. Does nothing unless Death Link is on.
+    """
+    display_name = "Death Link Amnesty (Arcade League)"
+    range_start = 1
+    range_end = 5
+    default = 3
+
+
 class StreamerMode(Toggle):
     """Replace the licensed song played in the Disco map and the credits with another track from the
     game ("Like A Monkey"), so that streams and recordings are not flagged for copyrighted music."""
@@ -313,7 +337,8 @@ class TsfpOptions(PerGameCommonOptions):
     starting_mission_count: StartingMissionCount
     story_mode: StoryMode
     goal: Goal
-    death_link: DeathLink
+    death_link: TsfpDeathLink
+    death_link_amnesty: DeathLinkAmnesty
     streamer_mode: StreamerMode
     story_levels_required: StoryLevelsRequired
     trophies_required: TrophiesRequired
@@ -352,8 +377,8 @@ class TsfpWebWorld(WebWorld):
         )
     ]
     option_groups = [
-        OptionGroup("Game Options", [StartingItem, StartingMissionCount, StoryMode, Goal, DeathLink,
-                                     StreamerMode]),
+        OptionGroup("Game Options", [StartingItem, StartingMissionCount, StoryMode, Goal, TsfpDeathLink,
+                                     DeathLinkAmnesty, StreamerMode]),
         OptionGroup("Goal Options - 1924 Future Perfect", [StoryLevelsRequired, TrophiesRequired,
                                                            TrophiesRequiredGrade]),
         OptionGroup("Goal Options - Trophy Hunt", [TrophyHuntSetting, TrophyGrade, ExcludeStoryMode]),
@@ -668,6 +693,7 @@ class TsfpWorld(World):
             "misc_score_multiplier": int(self.options.misc_score_multiplier.value),
             "starting_armour": int(self.options.starting_armour.value),
             "death_link": int(bool(self.options.death_link)),
+            "death_link_amnesty": int(self.options.death_link_amnesty.value),
             "streamer_mode": int(bool(self.options.streamer_mode)),
             **{option: int(bool(getattr(self.options, option))) for option in game_data.EASIER_TROPHIES},
             "include_weapon_buffs": int(bool(self.options.include_weapon_buffs)),
