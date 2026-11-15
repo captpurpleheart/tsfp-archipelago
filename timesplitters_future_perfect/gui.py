@@ -18,9 +18,15 @@ def make_gui(base_class: type) -> type:
     from kivymd.uix.label import MDLabel
     from kivymd.uix.scrollview import MDScrollView
 
+    import Utils
+
+    def window_title() -> str:
+        return f"TimeSplitters: Future Perfect Client (AP Version {Utils.__version__})"
+
     class TsfpManager(base_class):
         def build(self):
             container = super().build()
+            self.title = window_title()
             try:
                 self.weapon_buffs_label = MDLabel(text=NO_BUFFS, halign="left", adaptive_height=True,
                                                   padding=(dp(12), dp(12)))
@@ -30,6 +36,12 @@ def make_gui(base_class: type) -> type:
             except Exception:
                 self.weapon_buffs_label = None      # an older Archipelago: carry on without the tab
             return container
+
+        def update_texts(self, dt):
+            # Archipelago (or Universal Tracker) writes its own name here; keep "| Connected to: ..."
+            super().update_texts(dt)
+            _, connected, details = self.title.partition(" | ")
+            self.title = window_title() + (f" | {details}" if connected else "")
 
         def update_weapon_buffs(self, levels) -> None:
             if getattr(self, "weapon_buffs_label", None) is not None:

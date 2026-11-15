@@ -24,7 +24,7 @@ UNLOCKS     The game decides whether something is unlocked by evaluating a small
 from dataclasses import dataclass
 
 GAME_NAME = "TimeSplitters Future Perfect"
-WORLD_VERSION = "1.1.0"     # keep in step with archipelago.json
+WORLD_VERSION = "1.3.0"     # keep in step with archipelago.json
 
 # The first 6 bytes of emulated memory (0x80000000) are the disc's game ID.
 GAME_ID_ADDRESS = 0x80000000
@@ -739,6 +739,210 @@ def _build_death_cave() -> tuple[int, ...]:
 
 
 DEATH_CAVE_CODE = _build_death_cave()
+
+# ---- In-game announcements ----
+# Every on-screen message goes through 0x80105D5C(player, style, text, delay): style 2 is the
+# line at the bottom of the screen (item messages), style 3 the big text in the middle. The
+# client puts the text at MESSAGE_TEXT and the style at MESSAGE_STYLE; a few instructions run from
+# the same once-a-frame table entry as Death Link (before it) pass them to the game and clear the
+# style word. Confirmed in game in Story, Arcade League and Challenges.
+# The game shows one line at a time: a new one replaces the one fading out. So after passing a
+# message on, the code waits MESSAGE_GAP frames before taking the next. It only counts (and takes
+# messages) on normal play frames: the game's own handler (0x8003305C) checks two flag bits in the
+# word at GAME_MODE_FLAGS first, and runs normal play only when neither is set.
+SHOW_MESSAGE_ROUTINE = 0x80105D5C
+MESSAGE_CAVE = 0x80002D80                    # up to 0x80002E00, where the score patches start
+OLD_MESSAGE_CAVE = 0x80002F40                # where 1.2.0 test builds put it
+MESSAGE_STYLE = 0x80002F80                   # 0 = nothing waiting
+MESSAGE_DELAY = 0x80002F84                   # float seconds before it shows: always 0
+MESSAGE_COOLDOWN = 0x80002F88                # frames left before the next message may be taken
+MESSAGE_GAP = 30                             # half a second: the client also waits (below)
+# The game's message queue for player 1: 16 entries of 0x16C bytes. Each holds the style (+0), the
+# text (+4), a timer in seconds (+0x144, starting at minus the delay and counting up while the game
+# runs) and the style's timings (+0x148, +0x150: for the bottom line 1.5 and 2.5, so it is on screen
+# for about 4 seconds). The client only passes the next message on once no message of the same
+# style is still on screen, so a new line never cuts the last one short.
+MESSAGE_QUEUE = 0x80578680 + 0x38
+MESSAGE_QUEUE_ENTRIES = 16
+MESSAGE_ENTRY_SIZE = 0x16C
+MESSAGE_ENTRY_TIMER, MESSAGE_ENTRY_STAGE_1, MESSAGE_ENTRY_STAGE_2 = 0x144, 0x148, 0x150
+MESSAGE_SPARE_SECONDS = 0.25
+GAME_MODE_FLAGS = 0x805015C0
+MESSAGE_TEXT = 0x80002F90                    # up to 0x80003000
+MESSAGE_TEXT_MAX = 0x80003000 - MESSAGE_TEXT - 1
+MESSAGE_STYLE_LINE, MESSAGE_STYLE_BIG = 2, 3
+
+
+def _build_message_cave() -> tuple[int, ...]:
+    def branch(index: int, target: int, link: int = 0) -> int:
+        return 0x48000000 | ((target - (MESSAGE_CAVE + 4 * index)) & 0x03FFFFFC) | link
+
+    def cond(index: int, bo: int, bi: int, target_index: int) -> int:
+        return (16 << 26) | (bo << 21) | (bi << 16) | ((4 * (target_index - index)) & 0xFFFC)
+
+    low = lambda address: address & 0xFFFF
+    out = 22
+    code = (
+        0x3D808000,                                    # 0  lis r12, 0x8000
+        0x3C600000 | (GAME_MODE_FLAGS >> 16),          # 1  lis r3, flags@ha
+        0x80630000 | low(GAME_MODE_FLAGS),             # 2  lwz r3, flags@l(r3)
+        0x74636000,                                    # 3  andis. r3, r3, 0x6000
+        cond(4, 4, 2, out),                            # 4  bne out             (not normal play)
+        0x808C0000 | low(MESSAGE_COOLDOWN),            # 5  lwz r4, cooldown(r12)
+        0x3484FFFF,                                    # 6  addic. r4, r4, -1
+        cond(7, 12, 0, 10),                            # 7  blt take            (cooldown was 0)
+        0x908C0000 | low(MESSAGE_COOLDOWN),            # 8  stw r4, cooldown(r12)
+        branch(9, MESSAGE_CAVE + 4 * out),             # 9  b out
+        0x80AC0000 | low(MESSAGE_STYLE),               # 10 take: lwz r5, style(r12)
+        0x2C050000,                                    # 11 cmpwi r5, 0
+        cond(12, 12, 2, out),                          # 12 beq out             (nothing waiting)
+        0x38000000,                                    # 13 li r0, 0
+        0x900C0000 | low(MESSAGE_STYLE),               # 14 stw r0, style(r12)
+        0x38000000 | MESSAGE_GAP,                      # 15 li r0, gap
+        0x900C0000 | low(MESSAGE_COOLDOWN),            # 16 stw r0, cooldown(r12)
+        0x7CA42B78,                                    # 17 mr r4, r5
+        0xC02C0000 | low(MESSAGE_DELAY),               # 18 lfs f1, delay(r12)
+        0x38AC0000 | low(MESSAGE_TEXT),                # 19 addi r5, r12, text
+        0x38600000,                                    # 20 li r3, 0 (player 1)
+        branch(21, SHOW_MESSAGE_ROUTINE, 1),           # 21 bl show the message
+        branch(22, DEATH_CAVE),                        # 22 out: b Death Link's check (then normal play)
+    )
+    assert MESSAGE_CAVE + 4 * len(code) <= 0x80002E00
+    return code
+
+
+MESSAGE_CAVE_CODE = _build_message_cave()
+
+# ---- Award screen ("New Feature Unlocked") ----
+# After a mission the game lists what became available: 0x802D9F68 calls eight steps in turn
+# (arcade levels, bot sets, characters, challenge sets, two empty ones, cheats, weapons). Each takes
+# the list length so far in r3, adds entries and returns how many it added, so their order can be
+# changed freely. The list holds 10 entries: heading text IDs at 0x805CE7BC and name text IDs 0x28
+# after, shown 3 to a page.
+# The client calls the game's steps in the order characters, weapons, cheats, arcade levels, bot
+# sets, challenge sets, and makes the last step AWARD_CAVE. That moves the game's entries down,
+# puts the client's first entries (story levels, missions, challenges) at the top, and adds the
+# client's other entries at the end. (Adding entries from the FIRST step did not show in game.)
+# Every line is a text ID: IDs from 3372 up are looked up at (text table) + 4 * id - 0x34B0 with no
+# upper limit, so an ID can be chosen that makes the game read a text pointer kept in
+# AWARD_POINTERS. The game's own text is never touched.
+# AWARD_SHOWN is set whenever the game builds the list (that is, after every mission).
+AWARD_LIST = 0x805CE7BC
+AWARD_TEXT_TABLE = 0x806115A8              # r13 - 0x6398: the text table for IDs 3372 and up
+AWARD_CAVE = 0x80002800                    # code, up to 0x80002900
+AWARD_FRONT_COUNT = 0x80002900             # the first FRONT_COUNT entries go at the top
+AWARD_COUNT = 0x80002904
+AWARD_SHOWN = 0x80002908
+AWARD_ENTRIES = 0x80002910                 # 10 x (heading text ID, name text ID)
+AWARD_POINTERS = 0x80002960                # 10 x (heading text pointer, name text pointer)
+AWARD_HEADING_TEXT = 0x800029C0            # 10 x 32 bytes
+AWARD_NAME_TEXT = 0x80002B00               # 10 x 64 bytes
+AWARD_END = AWARD_NAME_TEXT + 10 * 64      # 0x80002D80 (the score patches start at 0x80002E00)
+AWARD_MAX = 10
+AWARD_HEADING_MAX, AWARD_NAME_MAX = 31, 63
+
+_AWARD_ARCADE_LEVELS, _AWARD_BOT_SETS, _AWARD_CHARACTERS = 0x802D9B30, 0x802D9BE0, 0x802D9C90
+_AWARD_CHALLENGE_SETS, _AWARD_CHEATS, _AWARD_WEAPONS = 0x802D9D50, 0x802D9E08, 0x802D9EB8
+_AWARD_EMPTY = 0x802D9DF8
+_AWARD_CALL_SITES = (0x802D9F7C, 0x802D9F84, 0x802D9F90, 0x802D9F9C,
+                     0x802D9FA8, 0x802D9FB4, 0x802D9FC0, 0x802D9FCC)
+_AWARD_ORIGINAL_ORDER = (_AWARD_ARCADE_LEVELS, _AWARD_BOT_SETS, _AWARD_CHARACTERS, _AWARD_CHALLENGE_SETS,
+                         _AWARD_EMPTY, 0x802D9E00, _AWARD_CHEATS, _AWARD_WEAPONS)
+_AWARD_NEW_ORDER = (_AWARD_CHARACTERS, _AWARD_WEAPONS, _AWARD_CHEATS, _AWARD_ARCADE_LEVELS,
+                    _AWARD_BOT_SETS, _AWARD_CHALLENGE_SETS, _AWARD_EMPTY, AWARD_CAVE)
+
+AWARD_STORY = "NEW STORY LEVEL AVAILABLE!"
+AWARD_MISSION = "NEW MISSION AVAILABLE!"
+AWARD_CHALLENGE = "NEW CHALLENGE AVAILABLE!"
+AWARD_ITEM = "ARCHIPELAGO ITEM FOUND!"
+AWARD_BUFF = "WEAPON BUFF FOUND!"
+AWARD_OTHER_PLAYER = "{player}'S ITEM!"
+
+
+def _branch(source: int, target: int, link: bool) -> int:
+    return 0x48000000 | ((target - source) & 0x03FFFFFC) | int(link)
+
+
+# (call site, the game's word, the client's word)
+AWARD_HOOKS: tuple[tuple[int, int, int], ...] = tuple(
+    (site, _branch(site, old, True), _branch(site, new, True))
+    for site, old, new in zip(_AWARD_CALL_SITES, _AWARD_ORIGINAL_ORDER, _AWARD_NEW_ORDER))
+
+
+def _build_award_cave() -> tuple[int, ...]:
+    """r3 = the game's list length; returns how many entries were added (front and back)."""
+    def d(op, rt, ra, imm): return (op << 26) | (rt << 21) | (ra << 16) | (imm & 0xFFFF)
+    def x(rt, ra, rb, xo): return (31 << 26) | (rt << 21) | (ra << 16) | (rb << 11) | (xo << 1)
+    def slwi(ra, rs, n): return (21 << 26) | (rs << 21) | (ra << 16) | (n << 11) | (0 << 6) | ((31 - n) << 1)
+    def cmpwi(ra, imm): return d(11, 0, ra, imm)
+    def cmpw(ra, rb): return x(0, ra, rb, 0)
+    low = lambda address: address - 0x80000000
+    labels: dict[str, int] = {}
+    code: list = []
+    def label(name): labels[name] = len(code)
+    def bc(kind, name): code.append((kind, name))          # resolved below
+    code += [d(15, 12, 0, 0x8000),                       # lis r12, 0x8000
+             d(36, 12, 12, low(AWARD_SHOWN)),            # stw r12, SHOWN(r12)
+             d(32, 5, 12, low(AWARD_FRONT_COUNT)),       # lwz r5, FRONT_COUNT(r12)   F
+             d(32, 4, 12, low(AWARD_COUNT)),             # lwz r4, COUNT(r12)         all entries
+             d(15, 6, 0, 0x805D),                        # lis r6, 0x805D
+             d(14, 6, 6, AWARD_LIST - 0x805D0000),       # addi r6, r6, list
+             x(3, 8, 3, 444),                            # mr r8, r3                  game's length
+             d(14, 7, 3, -1)]                            # addi r7, r3, -1            i = last entry
+    label("shift")                                       # move the game's entries down by F
+    code.append(cmpwi(7, 0)); bc("blt", "front")
+    code += [x(10, 7, 5, 266),                           # add r10, r7, r5
+             cmpwi(10, AWARD_MAX)]
+    bc("bge", "next")
+    code += [slwi(11, 7, 2), slwi(10, 10, 2),
+             x(0, 6, 11, 23), x(0, 6, 10, 151),          # lwzx r0,r6,r11 / stwx r0,r6,r10
+             d(14, 11, 11, 0x28), d(14, 10, 10, 0x28),
+             x(0, 6, 11, 23), x(0, 6, 10, 151)]
+    label("next")
+    code.append(d(14, 7, 7, -1)); bc("b", "shift")
+    label("front")                                       # the client's first F entries at the top
+    code += [d(14, 7, 0, 0), d(14, 9, 12, low(AWARD_ENTRIES))]
+    label("front_loop")
+    code.append(cmpw(7, 5)); bc("bge", "front_done")
+    code += [slwi(10, 7, 2), d(32, 0, 9, 0), x(0, 6, 10, 151), d(14, 10, 10, 0x28),
+             d(32, 0, 9, 4), x(0, 6, 10, 151), d(14, 9, 9, 8), d(14, 7, 7, 1)]
+    bc("b", "front_loop")
+    label("front_done")
+    code += [x(3, 3, 5, 266), cmpwi(3, AWARD_MAX)]       # length = min(length + F, 10)
+    bc("ble", "back")
+    code.append(d(14, 3, 0, AWARD_MAX))
+    label("back")                                        # the client's other entries at the end
+    code.append(cmpw(7, 4)); bc("bge", "done")
+    code.append(cmpwi(3, AWARD_MAX)); bc("bge", "done")
+    code += [slwi(10, 3, 2), d(32, 0, 9, 0), x(0, 6, 10, 151), d(14, 10, 10, 0x28),
+             d(32, 0, 9, 4), x(0, 6, 10, 151), d(14, 9, 9, 8), d(14, 7, 7, 1), d(14, 3, 3, 1)]
+    bc("b", "back")
+    label("done")
+    code += [x(3, 8, 3, 40),                             # subf r3, r8, r3: entries added
+             0x4E800020]                                 # blr
+    conditions = {"blt": (12, 0), "bge": (4, 0), "ble": (4, 1)}
+    words = []
+    for k, item in enumerate(code):
+        if isinstance(item, tuple):
+            kind, name = item
+            offset = 4 * (labels[name] - k)
+            if kind == "b":
+                item = 0x48000000 | (offset & 0x03FFFFFC)
+            else:
+                bo, bi = conditions[kind]
+                item = (16 << 26) | (bo << 21) | (bi << 16) | (offset & 0xFFFC)
+        words.append(item)
+    assert AWARD_CAVE + 4 * len(words) <= AWARD_FRONT_COUNT
+    return tuple(words)
+
+
+AWARD_CAVE_CODE = _build_award_cave()
+
+
+def award_text_id(table: int, pointer_address: int) -> int:
+    """A text ID that the game's text lookup turns into the pointer stored at pointer_address."""
+    return ((pointer_address - table + 0x34B0) & 0xFFFFFFFF) >> 2
+assert MESSAGE_CAVE + 4 * len(MESSAGE_CAVE_CODE) <= MESSAGE_STYLE
 DEATH_TRIGGER_POLLS = 8                      # polls to wait for the game to act on the trigger
 
 STARTING_ARMOUR_SETTLE_POLLS = 4             # polls (0.25 s each) to wait after a new life begins
