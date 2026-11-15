@@ -263,8 +263,9 @@ class StartingArmour(Choice):
 
 class TsfpDeathLink(DeathLink):
     """
-    When you fail a mission, everyone else with Death Link on dies; when they die, the mission you
-    are playing fails. Failing means dying in a Story level, failing a Story objective, or failing
+    When you fail a mission, everyone else with Death Link on dies; when they die, you die in the
+    mission you are playing (which fails it in Story and Challenges; in Arcade League you respawn).
+    Failing means dying in a Story level, failing a Story objective, or failing
     an Arcade League mission or Challenge (finishing below Bronze counts). In Arcade League
     missions you respawn, so deaths there are counted with Death Link Amnesty instead.
     """

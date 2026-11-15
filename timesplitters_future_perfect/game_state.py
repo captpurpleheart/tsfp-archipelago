@@ -644,28 +644,45 @@ class AwardScreen:
 
 
 class MissionFailure:
-    """Notices the game failing a mission, and can make it fail the one being played."""
+    """
+    Notices the game failing a mission, and can kill the player in the one being played (for a
+    Death Link received). A kill we caused, and the failure or respawn that follows it, are never
+    reported as the player's own.
+    """
 
     def __init__(self) -> None:
         self.armed = False        # a mission is being played and has not failed yet
-        self.caused = False       # the next failure is one we asked for
+        self.caused = False       # the player's current death (and any failure from it) is ours
         self.waiting = 0          # polls left for the game to act on our request
+
+    def _life(self, mem):
+        pointer = _read_word(mem, game_data.PLAYER_STATE_POINTER)
+        if not game_data.RAM_START <= pointer < game_data.RAM_END - 0x100:
+            return None
+        return _read_word(mem, pointer + game_data.PLAYER_LIFE_OFFSET)
 
     def poll(self, mem):
         """Call every 0.25 s. Returns the mission's name when it has just failed by itself."""
         if self.waiting:
             self.waiting -= 1
-            if not self.waiting and _read_word(mem, game_data.DEATH_TRIGGER):   # the game never took it
+            if _read_word(mem, game_data.DEATH_TRIGGER) == 0:
+                self.waiting = 0                                   # the game has acted on it
+            elif not self.waiting:                                 # the game never took it
                 mem.write_word(game_data.DEATH_TRIGGER, 0)
                 self.caused = False
         mission = current_mission(mem)
+        game = _read_word(mem, game_data.GAME_STATE)
         if mission is None:
-            self.armed = False
+            self.armed = self.caused = False
             return None
         failed = _read_word(mem, game_data.SETUP_FLAGS_54) & game_data.SETUP_FAILED_FLAG
         if not failed:
-            if _read_word(mem, game_data.GAME_STATE) == game_data.GAME_STATE_PLAYING:
+            if game == game_data.GAME_STATE_PLAYING:
                 self.armed = True
+                if self.caused and not self.waiting and self._life(mem) == game_data.PLAYER_ALIVE:
+                    self.caused = False                            # respawned (Arcade League)
+            elif game == game_data.GAME_STATE_LOADING:
+                self.caused = False                                # a restart
             return None
         if not self.armed:
             return None
@@ -676,10 +693,12 @@ class MissionFailure:
         return mission_name(mission)
 
     def fail(self, mem):
-        """Fail the mission being played. Returns its name, or None when there is nothing to fail."""
+        """Kill the player in the mission being played. Returns its name, or None when there is
+        nothing to do (not in a mission, paused in a menu, already dead...)."""
         mission = current_mission(mem)
         if (mission is None or not self.armed or self.caused
                 or _read_word(mem, game_data.GAME_STATE) != game_data.GAME_STATE_PLAYING
+                or self._life(mem) != game_data.PLAYER_ALIVE
                 or ensure_frame_hook(mem) != "ready"):
             return None
         mem.write_word(game_data.DEATH_TRIGGER, 1)

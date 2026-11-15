@@ -24,7 +24,7 @@ UNLOCKS     The game decides whether something is unlocked by evaluating a small
 from dataclasses import dataclass
 
 GAME_NAME = "TimeSplitters Future Perfect"
-WORLD_VERSION = "1.3.0"     # keep in step with archipelago.json
+WORLD_VERSION = "1.3.1"     # keep in step with archipelago.json
 
 # The first 6 bytes of emulated memory (0x80000000) are the disc's game ID.
 GAME_ID_ADDRESS = 0x80000000
@@ -715,26 +715,43 @@ DEATH_TRIGGER = 0x80002EFC
 DEATH_CAVE = 0x80002F00
 
 
+KILL_CHARACTER_ROUTINE = 0x8008EA74         # the game's "this character dies" (e.g. out of oxygen)
+PLAYER_DEAD_FLAG = 0x8                      # bit in the player state's +0x24 word
+
+
 def _build_death_cave() -> tuple[int, ...]:
+    """When the trigger is set: kill player 1 through the game's own routine (so the game fails the
+    mission, or respawns you in Arcade League, exactly as for any death), then normal play."""
     def branch(index: int, target: int, link: int = 0) -> int:
         return 0x48000000 | ((target - (DEATH_CAVE + 4 * index)) & 0x03FFFFFC) | link
+
+    def beq(index: int, target_index: int) -> int:
+        return 0x41820000 | ((4 * (target_index - index)) & 0xFFFC)
+
+    def bne(index: int, target_index: int) -> int:
+        return 0x40820000 | ((4 * (target_index - index)) & 0xFFFC)
+
     low = DEATH_TRIGGER & 0xFFFF
+    normal = 17
     return (
-        0x3D800000 | (DEATH_TRIGGER >> 16),    # lis r12, 0x8000
-        0x800C0000 | low,                      # lwz r0, trigger(r12)
-        0x2C000000,                            # cmpwi r0, 0
-        0x4182002C,                            # beq -> carry on as normal
-        0x38000000,                            # li r0, 0
-        0x900C0000 | low,                      # stw r0, trigger(r12)
-        0x3C808050,                            # lis r4, 0x8050
-        0x38841570,                            # addi r4, r4, 0x1570        (the setup)
-        0x80040054,                            # lwz r0, 0x54(r4)
-        0x64000001,                            # oris r0, r0, 1             (failed)
-        0x90040054,                            # stw r0, 0x54(r4)
-        0x38600000,                            # li r3, 0
-        branch(12, END_LEVEL_ROUTINE, 1),      # bl end the level
-        branch(13, STATE_HANDLER_EXIT),
-        branch(14, STATE_PLAYING_HANDLER),
+        0x3D800000 | (DEATH_TRIGGER >> 16),             # 0  lis r12, 0x8000
+        0x800C0000 | low,                               # 1  lwz r0, trigger(r12)
+        0x2C000000,                                     # 2  cmpwi r0, 0
+        beq(3, normal),                                 # 3  beq normal
+        0x38000000,                                     # 4  li r0, 0
+        0x900C0000 | low,                               # 5  stw r0, trigger(r12)
+        0x3C600000 | ((PLAYER_STATE_POINTER + 0x8000) >> 16),   # 6  lis r3, state@ha
+        0x80630000 | (PLAYER_STATE_POINTER & 0xFFFF),   # 7  lwz r3, state@l(r3)
+        0x28030000,                                     # 8  cmplwi r3, 0
+        beq(9, normal),                                 # 9  beq normal
+        0x80030000 | PLAYER_LIFE_OFFSET,                # 10 lwz r0, 0x24(r3)
+        0x70000000 | PLAYER_DEAD_FLAG,                  # 11 andi. r0, r0, 8
+        bne(12, normal),                                # 12 bne normal         (already dead)
+        0x80630000,                                     # 13 lwz r3, 0(r3)      (the character)
+        0x28030000,                                     # 14 cmplwi r3, 0
+        beq(15, normal),                                # 15 beq normal
+        branch(16, KILL_CHARACTER_ROUTINE, 1),          # 16 bl kill it
+        branch(17, STATE_PLAYING_HANDLER),              # 17 normal: b the game's own handler
     )
 
 

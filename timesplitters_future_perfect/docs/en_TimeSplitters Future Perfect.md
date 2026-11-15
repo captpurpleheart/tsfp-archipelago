@@ -138,8 +138,11 @@ With Death Link on, failing a mission sends a death to everyone else with it on:
 Story level, failing a Story objective, or failing an Arcade League mission or Challenge. In
 Arcade League missions you respawn when you die, so a death is sent every few deaths instead: the
 Death Link Amnesty option (1 to 5, default 3) sets how many deaths in one mission send one
-(1 = every death). The count starts again with every mission, including a restart. When someone else's death arrives, the
-mission you are playing fails; nothing happens if you are in the menus or a custom Arcade match.
+(1 = every death). The count starts again with every mission, including a restart. When someone
+else's death arrives, you die in the mission you are playing, just as if you had been killed: in
+Story levels and Challenges that fails the mission, in Arcade League missions you respawn. A death
+you receive is never sent on and doesn't count towards Amnesty. Nothing happens if you are in the
+menus or a custom Arcade match, or are already dead.
 Finishing an Arcade League mission or Challenge below Bronze counts as failing it. Receiving
 deaths needs Dolphin's cheat codes to be off.
 

@@ -212,6 +212,9 @@ class TsfpContext(CommonContext):
             seed_version = str(slot_data.get("world_version", "unknown"))
             if seed_version == game_data.WORLD_VERSION:
                 logger.info(f"This game was generated with apworld {seed_version}, the same as this client.")
+            elif seed_version.split(".")[:2] == game_data.WORLD_VERSION.split(".")[:2]:
+                logger.info(f"This game was generated with apworld {seed_version}; this client is "
+                            f"{game_data.WORLD_VERSION}, a fix for the same version, so nothing is missing.")
             else:
                 logger.warning(f"This game was generated with apworld {seed_version}, but this client is "
                                f"{game_data.WORLD_VERSION}. Items added since {seed_version} are not in this game; "
@@ -443,8 +446,8 @@ async def death_link(ctx: TsfpContext, hook_ready: bool) -> None:
     if ctx.death_pending:
         ctx.death_pending = False
         target = ctx.mission_failure.fail(dolphin) if hook_ready else None
-        logger.info(f"Death Link received: {target} failed." if target
-                    else "Death Link received, but you are not in a mission, so nothing happened.")
+        logger.info(f"Death Link received: you died in {target}." if target
+                    else "Death Link received, but you are not playing a mission, so nothing happened.")
 
 
 def enforce_misc_score(ctx: TsfpContext, multiplier: int) -> None:

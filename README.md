@@ -35,7 +35,7 @@ https://discord.gg/M9cbCqc8sF
   or all 48.
 * **Easier trophies (optional):** easier times for Astro Jocks, Rumble In The Jungle and Electro Chimp
   Discomatic, and lower Platinum scores for the Cut-Out Shoot-Out Challenges.
-* **Death Link:** failing a mission sends a death; a death received fails the mission you are in.
+* **Death Link:** failing a mission sends a death; a death received kills you in the mission you are in.
   In Arcade League missions, Death Link Amnesty (1 to 5) sets how many deaths send one.
 * **In-game announcements:** items you receive, send and find appear as on-screen text while you
   play, and received Death Links in large text. Use `/announce` in the client to choose which.
