@@ -27,9 +27,11 @@ https://discord.gg/M9cbCqc8sF
 * **Items:** all 48 Arcade League missions and Challenges, the 13 story levels (or Progressive Story
   Levels), all 150 characters, the 13 cheats and 34 arcade weapons, optional bonus items (Progressive
   Starting Armour, Progressive Behead The Undead Score Multiplier, Progressive Miscellaneous
-  Challenges Score Multiplier), and weapon buffs filling the leftover locations.
+  Challenges Score Multiplier), Progressive Damage Resistances, Progressive Shop Restocks, Trophy
+  items for shop points, and weapon buffs filling the leftover locations.
 * **Locations:** Bronze/Silver/Gold/Platinum trophies on every mission, story level completions per
-  difficulty, story objectives, and optional group/league/all-Challenges milestones.
+  difficulty, story objectives, optional group/league/all-Challenges milestones, and the optional
+  Archipelago Shop.
 * **Goals:** complete 1924 Future Perfect (optionally needing a number of story levels and trophies
   first), or a Trophy Hunt: a chosen grade of trophy on every Arcade League mission, every Challenge,
   or all 48.
@@ -39,6 +41,10 @@ https://discord.gg/M9cbCqc8sF
   In Arcade League missions, Death Link Amnesty (1 to 5) sets how many deaths send one.
 * **In-game announcements:** items you receive, send and find appear as on-screen text while you
   play, and received Death Links in large text. Use `/announce` in the client to choose which.
+* **Archipelago Shop:** Extras & Shop > Archipelago Shop sells 15 to 75 items for points earned from
+  kills, trophies and story levels.
+* **Inventory tab:** the client lists the shop's items and your points, and the damage resistances,
+  weapon buffs, score multipliers and starting armour you have.
 * **Award screen:** after a mission, the "New Feature Unlocked" screen also lists the story levels,
   missions, challenges, bonus items and other players' items you found or received.
 * **Streamer Mode:** replaces the licensed Disco and credits song with another track from the game.

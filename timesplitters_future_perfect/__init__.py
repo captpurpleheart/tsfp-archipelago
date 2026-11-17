@@ -291,6 +291,16 @@ class StreamerMode(Toggle):
     display_name = "Streamer Mode"
 
 
+class IncludeDamageResistances(DefaultOnToggle):
+    """
+    Adds five Progressive Damage Resistance items (Bullet, Explosive, Fire, Plasma, Melee), 6 of
+    each: every copy cuts the damage you take of that kind by 10%, up to 60%. Enemies are not
+    affected. They go in the locations left after every other item, before weapon buffs (except
+    the ones that are always included), so a game holds all of them unless locations run short.
+    """
+    display_name = "Include Damage Resistances"
+
+
 class IncludeWeaponBuffs(DefaultOnToggle):
     """
     Adds weapon buffs (bigger clips, more reserve ammo) to the item pool. They fill whatever
@@ -298,6 +308,46 @@ class IncludeWeaponBuffs(DefaultOnToggle):
     When off, those locations hold "Nothing" instead.
     """
     display_name = "Include Weapon Buffs"
+
+
+class IncludeArchipelagoShop(DefaultOnToggle):
+    """
+    Turns Extras > View Movies into the Archipelago Shop ("Extras & Shop" > "Archipelago Shop"),
+    where you buy locations with points. Points come from every kill (1, in any mode), trophies
+    (Bronze 10, Silver 20, Gold 30, Platinum 40, a better trophy counting the ones below it) and
+    story levels finished (Easy 15, Normal 35, Hard 50, likewise). Prices: 1-15 points for filler
+    and traps, 5-75 for useful items, 15-200 for progression, and at least 85 for a story level.
+    Items in the shop can be hinted when you open it (see Shop Hints). Movies can't be watched
+    from that menu. Bronze/Silver/Gold/Platinum Trophy items (10/20/30/40 points) take the place of
+    every "Nothing", and a few are mixed in with the weapon buffs.
+    """
+    display_name = "Include Archipelago Shop"
+
+
+class ShopLocations(Choice):
+    """
+    How many shop locations there are. The shop shows 15 at a time; every 15 after the first
+    needs one more Progressive Shop Restock item (one for 30 ... four for 75).
+    """
+    display_name = "How Many Shop Locations"
+    option_15 = 15
+    option_30 = 30
+    option_45 = 45
+    option_60 = 60
+    option_75 = 75
+    default = 15
+
+
+class ShopHints(Choice):
+    """
+    Which items in the Archipelago Shop are hinted when you open it (and when buying brings up a
+    row's next item): none, all of them, or only progression items.
+    """
+    display_name = "Shop Hints"
+    option_none = 0
+    option_all = 1
+    option_progression_only = 2
+    default = 2
 
 
 class ArcadeGroupMilestones(DefaultOnToggle):
@@ -359,6 +409,10 @@ class TsfpOptions(PerGameCommonOptions):
     misc_score_multiplier: MiscScoreMultiplier
     early_misc_score_multiplier: EarlyMiscScoreMultiplier
     include_weapon_buffs: IncludeWeaponBuffs
+    include_damage_resistances: IncludeDamageResistances
+    include_archipelago_shop: IncludeArchipelagoShop
+    shop_locations: ShopLocations
+    shop_hints: ShopHints
     arcade_group_milestones: ArcadeGroupMilestones
     challenge_group_milestones: ChallengeGroupMilestones
     league_milestones: LeagueMilestones
@@ -386,7 +440,9 @@ class TsfpWebWorld(WebWorld):
                                             EasierAstroJocks, EasierRumbleInTheJungle, EasierCutOutShootOut,
                                             QuickerElectroChimpDiscomatic]),
         OptionGroup("Bonus Items", [StartingArmour, ScoreMultiplier, EarlyScoreMultiplier,
-                                    MiscScoreMultiplier, EarlyMiscScoreMultiplier, IncludeWeaponBuffs]),
+                                    MiscScoreMultiplier, EarlyMiscScoreMultiplier, IncludeWeaponBuffs,
+                                    IncludeDamageResistances]),
+        OptionGroup("Archipelago Shop", [IncludeArchipelagoShop, ShopLocations, ShopHints]),
         OptionGroup("Milestone Locations", [ArcadeGroupMilestones, ChallengeGroupMilestones, LeagueMilestones,
                                             AllChallengesMilestone]),
     ]
@@ -414,6 +470,11 @@ class TsfpWorld(World):
         "Cheats": set(game_data.CHEAT_ITEM_NAMES),
         "Weapons": set(game_data.WEAPON_ITEM_NAMES),
         "Weapon Buffs": set(game_data.WEAPON_BUFF_ITEM_NAMES),
+        "Damage Resistances": set(game_data.RESISTANCE_ITEM_NAMES),
+        "Trophies": set(game_data.TROPHY_FILLER_ITEM_NAMES),
+    }
+    location_name_groups = {
+        "Archipelago Shop": {game_data.shop_location_name(k) for k in range(game_data.SHOP_MAX)},
     }
 
     # Universal Tracker: it can rebuild this world from slot data alone (see interpret_slot_data).
@@ -423,6 +484,10 @@ class TsfpWorld(World):
     starting_openers: list[str]
     starting_character: str = ""
     starting_weapon: str = ""
+
+    @property
+    def shop_size(self) -> int:
+        return int(self.options.shop_locations.value) if self.options.include_archipelago_shop else 0
 
     @property
     def progressive(self) -> bool:
@@ -487,6 +552,10 @@ class TsfpWorld(World):
             self.options.misc_score_multiplier.value = passthrough.get("misc_score_multiplier", 0)
             self.options.starting_armour.value = passthrough["starting_armour"]
             self.options.include_weapon_buffs.value = passthrough["include_weapon_buffs"]
+            self.options.include_damage_resistances.value = passthrough.get("include_damage_resistances", 0)
+            self.options.include_archipelago_shop.value = passthrough.get("include_archipelago_shop", 0)
+            self.options.shop_locations.value = passthrough.get("shop_locations", 0) or game_data.SHOP_ROWS
+            self.options.shop_hints.value = passthrough.get("shop_hints", game_data.SHOP_HINTS_PROGRESSION)
             self.starting_openers = list(passthrough.get("starting_openers", [passthrough["starting_opener"]]))
             self.starting_opener = self.starting_openers[0]
             self.starting_character = passthrough["starting_character"]
@@ -604,6 +673,19 @@ class TsfpWorld(World):
             entrance = menu.connect(region)
             set_rule(entrance, lambda state, k=level: self.has_story_level(state, k))
 
+        # The Archipelago Shop: batch b (15 locations) needs b Progressive Shop Restocks. Points can
+        # always be earned (every kill counts), so nothing else is needed.
+        if self.shop_size:
+            region = Region("Archipelago Shop", self.player, self.multiworld)
+            region.add_locations({game_data.shop_location_name(k): game_data.shop_location_id(k)
+                                  for k in range(self.shop_size)}, TsfpLocation)
+            self.multiworld.regions.append(region)
+            menu.connect(region)
+            for k in range(game_data.SHOP_ROWS, self.shop_size):
+                batch = k // game_data.SHOP_ROWS
+                set_rule(self.get_location(game_data.shop_location_name(k)),
+                         lambda state, batch=batch: state.has(game_data.SHOP_RESTOCK_ITEM_NAME, self.player, batch))
+
         # Goal: an event location holding a locked "Victory" item.
         if self.story_goal:
             victory = self.get_location(game_data.STORY_GOAL_LOCATION_NAME)
@@ -622,6 +704,8 @@ class TsfpWorld(World):
             names += list(game_data.STORY_ITEM_NAMES)
         for name in self.starting_openers:
             names.remove(name)
+        if self.shop_size:
+            names += [game_data.SHOP_RESTOCK_ITEM_NAME] * (self.shop_size // game_data.SHOP_ROWS - 1)
         names += list(game_data.CHEAT_ITEM_NAMES)
         names += [n for n in game_data.WEAPON_ITEM_NAMES if n != self.starting_weapon]
         if self.options.score_multiplier == ScoreMultiplier.option_shuffle_all:
@@ -639,14 +723,25 @@ class TsfpWorld(World):
             names += [game_data.STARTING_ARMOUR_ITEM_NAME] * (game_data.STARTING_ARMOUR_COPIES - 1)
         location_count = sum(1 for loc in self.multiworld.get_locations(self.player) if loc.address is not None)
         # Whatever room is left (after starting armour and score multipliers, added above) goes to
-        # weapon buffs when they are switched on: first every copy of the ones marked "always
-        # in the pool", then a random pick from all the other copies. "Nothing" only if buffs run out.
-        always, others = [], []
+        # weapon buffs and damage resistances when they are switched on: first every copy of the
+        # buffs marked "always in the pool", then every damage resistance, then a random pick from
+        # the other buff copies. "Nothing" only if they run out.
+        always, resistances, others = [], [], []
         if self.options.include_weapon_buffs:
             for name, buff in zip(game_data.WEAPON_BUFF_ITEM_NAMES, game_data.WEAPON_BUFFS):
                 (always if buff[6] else others).extend([name] * buff[5])
+        if self.options.include_damage_resistances:
+            for name in game_data.RESISTANCE_ITEM_NAMES:
+                resistances.extend([name] * game_data.RESISTANCE_COPIES)
+        if self.shop_size:
+            # Trophy items (points for the shop) are mixed in with the other buffs, and take every
+            # "Nothing" slot.
+            others += [self.random_trophy_filler() for _ in range(game_data.TROPHY_FILLER_COPIES)]
+        self.random.shuffle(resistances)            # if they don't all fit, a random few are left out
         self.random.shuffle(others)
-        names += (always + others)[:max(0, location_count - len(names))]
+        names += (always + resistances + others)[:max(0, location_count - len(names))]
+        if self.shop_size:
+            names += [self.random_trophy_filler() for _ in range(location_count - len(names))]
         names += [game_data.FILLER_ITEM_NAME] * (location_count - len(names))
         self.multiworld.itempool += [self.create_item(name) for name in names]
 
@@ -659,10 +754,13 @@ class TsfpWorld(World):
             # checks, which then only hold useful and filler items.)
             classification = (ItemClassification.progression if self.story_goal
                               else ItemClassification.progression_skip_balancing)
+        elif name == game_data.SHOP_RESTOCK_ITEM_NAME:
+            classification = ItemClassification.progression_skip_balancing
         elif name in game_data.MISSION_ITEM_NAMES:
             classification = (ItemClassification.progression if name in self.hunted
                               else ItemClassification.progression_skip_balancing)
         elif (name in game_data.CHEAT_ITEM_NAMES or name in game_data.WEAPON_BUFF_ITEM_NAMES
+              or name in game_data.RESISTANCE_ITEM_NAMES
               or name in (game_data.SCORE_MULTIPLIER_ITEM_NAME, game_data.MISC_MULTIPLIER_ITEM_NAME,
                           game_data.STARTING_ARMOUR_ITEM_NAME)):
             classification = ItemClassification.useful
@@ -670,8 +768,38 @@ class TsfpWorld(World):
             classification = ItemClassification.filler   # characters, weapons and "Nothing"
         return TsfpItem(name, classification, game_data.ITEM_NAME_TO_ID[name], self.player)
 
+    def random_trophy_filler(self) -> str:
+        grades = [t[0] for t in game_data.TROPHY_FILLERS]
+        weights = [t[2] for t in game_data.TROPHY_FILLERS]
+        return game_data.trophy_filler_item_name(self.random.choices(grades, weights)[0])
+
     def get_filler_item_name(self) -> str:
+        if self.shop_size:
+            return self.random_trophy_filler()
         return game_data.FILLER_ITEM_NAME
+
+    def shop_prices(self) -> list[int]:
+        """The price of each shop location, by what ended up there (after the fill)."""
+        import random
+        rng = random.Random(f"{self.multiworld.seed}-{self.player}-shop")
+        prices = []
+        for k in range(self.shop_size):
+            item = self.get_location(game_data.shop_location_name(k)).item
+            if item is not None and item.advancement:
+                kind = "progression"
+            elif item is not None and item.useful:
+                kind = "useful"
+            else:
+                kind = "filler"
+            low, high = game_data.SHOP_PRICES[kind]
+            if item is not None and (
+                    (item.game == game_data.GAME_NAME and (item.name in game_data.STORY_ITEM_NAMES
+                                                           or item.name == game_data.PROGRESSIVE_STORY_ITEM_NAME))
+                    or (item.game == game_data.TS2_GAME_NAME and item.name in game_data.TS2_STORY_ITEM_NAMES)):
+                low = max(low, game_data.STORY_MIN_PRICE)
+                high = max(high, game_data.SHOP_PRICES["progression"][1])
+            prices.append(rng.randint(low, high))
+        return prices
 
     def set_rules(self) -> None:
         self.multiworld.completion_condition[self.player] = lambda state: state.has(
@@ -697,6 +825,11 @@ class TsfpWorld(World):
             "streamer_mode": int(bool(self.options.streamer_mode)),
             **{option: int(bool(getattr(self.options, option))) for option in game_data.EASIER_TROPHIES},
             "include_weapon_buffs": int(bool(self.options.include_weapon_buffs)),
+            "include_damage_resistances": int(bool(self.options.include_damage_resistances)),
+            "include_archipelago_shop": int(bool(self.options.include_archipelago_shop)),
+            "shop_locations": self.shop_size,
+            "shop_prices": self.shop_prices(),
+            "shop_hints": int(self.options.shop_hints.value),
             "arcade_group_milestones": int(bool(self.options.arcade_group_milestones)),
             "challenge_group_milestones": int(bool(self.options.challenge_group_milestones)),
             "league_milestones": int(bool(self.options.league_milestones)),

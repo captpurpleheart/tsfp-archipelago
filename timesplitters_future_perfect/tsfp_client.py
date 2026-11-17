@@ -98,8 +98,10 @@ class TsfpContext(CommonContext):
         self.trophy_hunt_setting: int = game_data.HUNT_ALL
         self.final_level_logged: Optional[bool] = None    # last "Future Perfect open?" written to the log
         self.misc_logged: tuple = ()                        # last Miscellaneous multiplier state logged
+        self.resistances: bool = False                      # this seed has damage resistances
+        self.resist_logged: tuple = ()                      # last damage resistance state logged
         self.score_logged: tuple = ()                       # last score multiplier state written to the log
-        self.buffs_shown: Optional[list] = None             # weapon buffs last shown in the Weapon Buffs tab
+        self.buffs_shown: Optional[str] = None              # the Inventory tab's text last shown
         self.buffs_skipped: list[str] = []                  # weapon buffs last reported as not applied
         # Story objectives are only visible at the moment they complete, so they are remembered
         # here until the server has them.
@@ -117,6 +119,23 @@ class TsfpContext(CommonContext):
         self.objective_tracker = game_state.ObjectiveTracker()
         self.objectives_found: set[int] = set()
         self.objectives_seed: Optional[str] = None
+        # Archipelago Shop (slot data, and the server's data storage for kills and points spent)
+        self.shop_size: int = 0
+        self.shop_prices: list[int] = []
+        self.shop_kills: Optional[int] = None       # None until the server has told us
+        self.shop_spent: Optional[int] = None
+        self.shop_kills_pending: int = 0            # kills not yet added on the server
+        self.shop_bought: set[int] = set()          # bought here, perhaps not yet confirmed by the server
+        self.shop_hinted: set[int] = set()
+        self.shop_hint_rows: set[int] = set()       # rows whose item to hint
+        self.shop_hints: int = game_data.SHOP_HINTS_ALL
+        self.award_hide: set[int] = set()           # bought characters, weapons and cheats to keep off the award screen
+        self.shop_menu = game_state.ShopMenu()
+        self.kill_counter = game_state.KillCounter()
+        self.shop_state_logged: str = ""
+        self.shop_earned: dict[str, int] = {"trophies": 0, "story": 0}   # last read from the profile
+        self.shop_notice: Optional[tuple[str, float]] = None              # (title, until) e.g. not enough points
+        self.shop_list: tuple = (None, [])          # the shop's points and rows, for the Inventory tab
 
     def items_ready(self) -> bool:
         """
@@ -179,13 +198,13 @@ class TsfpContext(CommonContext):
             self.announcer.add(text, game_data.MESSAGE_STYLE_LINE)
 
     def make_gui(self):
-        """The normal client window (or Universal Tracker's), plus a Weapon Buffs tab."""
+        """The normal client window (or Universal Tracker's), plus an Inventory tab."""
         base = super().make_gui()
         try:
             from . import gui
             return gui.make_gui(base)
         except Exception:
-            logger.warning("Could not add the Weapon Buffs tab; the rest of the client is unaffected.")
+            logger.warning("Could not add the Inventory tab; the rest of the client is unaffected.")
             logger.debug(traceback.format_exc())
             return base
 
@@ -207,6 +226,16 @@ class TsfpContext(CommonContext):
             self.easier_trophies = {option: bool(slot_data.get(option, 0)) for option in game_data.EASIER_TROPHIES}
             Utils.async_start(self.update_death_link(bool(slot_data.get("death_link", 0))))
             self.death_link_amnesty = int(slot_data.get("death_link_amnesty", 0))   # 0: seeds before 1.3.0
+            self.resistances = bool(slot_data.get("include_damage_resistances", 0))  # 0: seeds before 1.4.0
+            self.shop_size = int(slot_data.get("shop_locations", 0)) if slot_data.get("include_archipelago_shop") else 0
+            self.shop_prices = list(slot_data.get("shop_prices", []))
+            self.shop_kills = self.shop_spent = None
+            self.shop_bought = set()
+            self.shop_hinted = set()
+            self.shop_hint_rows = set()
+            self.shop_hints = int(slot_data.get("shop_hints", game_data.SHOP_HINTS_ALL))   # all: older seeds
+            if self.shop_size:
+                Utils.async_start(self.send_msgs([{"cmd": "Get", "keys": [self.shop_kills_key, self.shop_spent_key]}]))
             logger.info("In-game announcements are " + ("on" if self.announce["on"] else "off")
                         + ". Type /announce to see or change them.")
             seed_version = str(slot_data.get("world_version", "unknown"))
@@ -232,7 +261,21 @@ class TsfpContext(CommonContext):
             self.items_synced = True
         elif cmd == "PrintJSON" and args.get("type") in ("ItemSend", "ItemCheat"):
             self.announce_item_send(args)
+        elif cmd == "Retrieved":
+            keys = args.get("keys", {})
+            if self.shop_kills_key in keys:
+                self.shop_kills = int(keys[self.shop_kills_key] or 0)
+            if self.shop_spent_key in keys:
+                self.shop_spent = int(keys[self.shop_spent_key] or 0)
         super().on_package(cmd, args)      # Universal Tracker listens to the same messages
+
+    @property
+    def shop_kills_key(self) -> str:
+        return f"tsfp_shop_kills_{self.team}_{self.slot}"
+
+    @property
+    def shop_spent_key(self) -> str:
+        return f"tsfp_shop_spent_{self.team}_{self.slot}"
 
 
 async def check_locations(ctx: TsfpContext, levels: dict[str, int], story: set[int]) -> None:
@@ -254,14 +297,37 @@ async def check_locations(ctx: TsfpContext, levels: dict[str, int], story: set[i
         ctx.victory_sent = True
 
 
-def show_weapon_buffs(ctx: TsfpContext, item_list: list[int]) -> None:
-    """Keep the Weapon Buffs tab showing the buffs received so far."""
-    levels = game_state.weapon_buff_levels(item_list)
-    if levels == ctx.buffs_shown:
+def show_inventory(ctx: TsfpContext, item_list: list[int]) -> None:
+    """Keep the Inventory tab showing the shop's points and rows, and the bonus items received."""
+    from . import gui
+    shop = ctx.shop_list if ctx.shop_size else None
+    levels = game_state.resistance_levels(item_list)
+    resistances = [(award.removesuffix(" Damage"), levels[name], game_data.RESISTANCE_COPIES,
+                    round(levels[name] * game_data.RESISTANCE_STEP * 100))
+                   for name, award, _types in game_data.RESISTANCES if levels[name]]
+    buffs = []
+    for weapon, stat, _address, normal, change, copies, _always in sorted(game_data.WEAPON_BUFFS):
+        have = min(item_list.count(game_data.ITEM_NAME_TO_ID[game_data.weapon_buff_item_name(weapon, stat, change)]),
+                   copies)
+        if have:
+            buffs.append((weapon, stat, round(change * have * 100), normal,
+                          game_data.weapon_buff_value(normal, change, have), have, copies))
+    multipliers = []
+    for name, (display, copies) in _SCORE_ITEMS.items():
+        have = min(item_list.count(game_data.ITEM_NAME_TO_ID[name]), copies)
+        if have:
+            multipliers.append((display, have + 1, have, copies))
+    other = []
+    armour = game_state.starting_armour_level(item_list)
+    if armour:
+        other.append(("Starting Armour", armour * 100 // game_data.STARTING_ARMOUR_COPIES, armour,
+                      game_data.STARTING_ARMOUR_COPIES))
+    text = gui.inventory_text(shop, resistances, buffs, multipliers, other)
+    if text == ctx.buffs_shown:
         return
-    ctx.buffs_shown = levels
-    if ctx.ui and hasattr(ctx.ui, "update_weapon_buffs"):
-        ctx.ui.update_weapon_buffs(levels)
+    ctx.buffs_shown = text
+    if ctx.ui and hasattr(ctx.ui, "update_inventory"):
+        ctx.ui.update_inventory(text)
 
 
 def enforce_score(ctx: TsfpContext, multiplier: int) -> None:
@@ -278,21 +344,22 @@ def enforce_score(ctx: TsfpContext, multiplier: int) -> None:
         logger.error("Behead The Undead score multipliers are NOT active: the scoring code is not what "
                      "the client expects.")
     elif multiplier > 1:
-        logger.info(f"Behead The Undead points are now x{multiplier}.")
+        logger.debug(f"Behead The Undead points are now x{multiplier}.")
 
 
 _ITEM_ID_TO_NAME = {code: name for name, code in game_data.ITEM_NAME_TO_ID.items()}
 _MISSIONS_BY_ITEM = {m.item_name: m for m in game_data.MISSIONS}
-_BUFFS_BY_ITEM = {game_data.weapon_buff_item_name(b[0], b[1], b[4]): f"{b[0]} {round(b[4] * 100)}% {b[1]}"
-                  for b in game_data.WEAPON_BUFFS}
+_BUFFS_BY_ITEM = {game_data.weapon_buff_item_name(b[0], b[1], b[4]): b for b in game_data.WEAPON_BUFFS}
+_RESISTANCES_BY_ITEM = {r[0]: r for r in game_data.RESISTANCES}
+_SCORE_ITEMS = {game_data.SCORE_MULTIPLIER_ITEM_NAME: ("Behead The Undead", game_data.SCORE_MULTIPLIER_COPIES),
+                game_data.MISC_MULTIPLIER_ITEM_NAME: ("Miscellaneous Challenges", game_data.MISC_MULTIPLIER_COPIES)}
 _NATIVE_AWARDS = (set(game_data.CHARACTER_ITEM_NAMES) | set(game_data.CHEAT_ITEM_NAMES)
                   | set(game_data.WEAPON_ITEM_NAMES) | {game_data.FILLER_ITEM_NAME})
 
-
-# Where each kind of entry goes on the award screen. The game's own entries (characters, weapons,
-# cheats, ...) come between the two groups.
-_FRONT_ORDER = (game_data.AWARD_STORY, game_data.AWARD_MISSION, game_data.AWARD_CHALLENGE)
-_BACK_ORDER = (game_data.AWARD_ITEM, game_data.AWARD_BUFF)
+# Where each kind of entry goes on the award screen: (0, n) before the game's own entries
+# (characters, weapons, cheats, ...), (1, n) after them.
+_STORY, _MISSION, _CHALLENGE = (0, 0), (0, 1), (0, 2)
+_ARMOUR, _SCORE, _RESISTANCE, _BUFF, _OTHER_PLAYER = (1, 0), (1, 1), (1, 2), (1, 3), (1, 4)
 
 
 def _other_player_rank(flags: int) -> int:
@@ -306,12 +373,35 @@ def _other_player_rank(flags: int) -> int:
     return 3
 
 
+def _award_line(name: str, held: int) -> tuple[str, str]:
+    """The line for one of our progressive items, when you hold `held` copies of it with this one."""
+    if name == game_data.PROGRESSIVE_STORY_ITEM_NAME:
+        return game_data.AWARD_STORY, game_data.STORY_LEVELS[held - 1]
+    if name in _BUFFS_BY_ITEM:
+        weapon, stat, _address, _normal, change, _copies, _always = _BUFFS_BY_ITEM[name]
+        return game_data.AWARD_BUFF.format(stat=stat.upper()), f"{weapon} {round(change * 100 * held)}%"
+    if name in _SCORE_ITEMS:
+        return game_data.AWARD_SCORE, f"{_SCORE_ITEMS[name][0]} x{held + 1}"
+    _item, award_name, _types = _RESISTANCES_BY_ITEM[name]
+    return game_data.AWARD_RESISTANCE, f"{award_name} {round(game_data.RESISTANCE_STEP * 100 * held)}%"
+
+
+def _most_copies(name: str) -> int:
+    if name == game_data.PROGRESSIVE_STORY_ITEM_NAME:
+        return len(game_data.STORY_LEVELS)
+    if name in _BUFFS_BY_ITEM:
+        return _BUFFS_BY_ITEM[name][5]
+    if name in _SCORE_ITEMS:
+        return _SCORE_ITEMS[name][1]
+    return game_data.RESISTANCE_COPIES
+
+
 def award_entries(ctx: TsfpContext) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     """The award screen lines for the items found or received since the last award screen, as
     (lines before the game's own entries, lines after them). Characters, cheats and weapons are left
     out: the game lists those itself once they unlock."""
-    entries: list[tuple[tuple[str, str], tuple]] = []      # (line, sort key)
-    progressive: list[int] = []          # positions of Progressive Story Level entries
+    entries: list = []                   # [line or None, sort key]
+    progressive: dict[str, list[int]] = {}    # item name: positions of its entries, for the totals
     for order, found in enumerate(ctx.award_screen.found):
         if isinstance(found, int):          # one of our locations: what is there
             item = ctx.locations_info.get(found)
@@ -321,13 +411,10 @@ def award_entries(ctx: TsfpContext) -> tuple[list[tuple[str, str]], list[tuple[s
         else:                               # an item another player sent us
             item, receiver = found, ctx.slot
         if receiver != ctx.slot:
-            try:
-                name = ctx.item_names.lookup_in_slot(item.item, item.player)
-            except Exception:
-                name = "Unknown item"
+            name = display_item_name(ctx, item.item, item.player)
             player = ctx.player_names.get(item.player, "Someone")
-            entries.append(((game_data.AWARD_OTHER_PLAYER.format(player=player), name),
-                            (1, len(_BACK_ORDER) + _other_player_rank(item.flags), order)))
+            entries.append([(game_data.AWARD_OTHER_PLAYER.format(player=player), name),
+                            (*_OTHER_PLAYER, _other_player_rank(item.flags), order)])
             continue
         name = _ITEM_ID_TO_NAME.get(item.item, "")
         if not name or name in _NATIVE_AWARDS:
@@ -336,35 +423,34 @@ def award_entries(ctx: TsfpContext) -> tuple[list[tuple[str, str]], list[tuple[s
             level = game_data.STORY_ITEM_NAMES.index(name)
             if ctx.last_played == ("story", level):
                 continue                    # you have just played it, so you know you have it
-            line = (game_data.AWARD_STORY, game_data.STORY_LEVEL_DATA[level][1])
-        elif name == game_data.PROGRESSIVE_STORY_ITEM_NAME:
-            progressive.append(len(entries))
-            line = (game_data.AWARD_STORY, "")
+            entries.append([(game_data.AWARD_STORY, game_data.STORY_LEVELS[level]), (*_STORY, 0, order)])
         elif name in _MISSIONS_BY_ITEM:
             mission = _MISSIONS_BY_ITEM[name]
             if ctx.last_played == ("mission", mission):
                 continue
-            heading = game_data.AWARD_CHALLENGE if mission.prefix == "Challenge" else game_data.AWARD_MISSION
-            line = (heading, mission.name)
-        elif name in _BUFFS_BY_ITEM:
-            line = (game_data.AWARD_BUFF, _BUFFS_BY_ITEM[name])
+            if mission.prefix == "Challenge":
+                entries.append([(game_data.AWARD_CHALLENGE, mission.name), (*_CHALLENGE, 0, order)])
+            else:
+                entries.append([(game_data.AWARD_MISSION, mission.name), (*_MISSION, 0, order)])
+        elif (name == game_data.PROGRESSIVE_STORY_ITEM_NAME or name in _BUFFS_BY_ITEM
+              or name in _SCORE_ITEMS or name in _RESISTANCES_BY_ITEM):
+            kind = (_STORY if name == game_data.PROGRESSIVE_STORY_ITEM_NAME else _BUFF if name in _BUFFS_BY_ITEM
+                    else _SCORE if name in _SCORE_ITEMS else _RESISTANCE)
+            progressive.setdefault(name, []).append(len(entries))
+            entries.append([None, (*kind, 0, order)])
         else:
-            line = (game_data.AWARD_ITEM, name)
-        heading = line[0]
-        key = (0, _FRONT_ORDER.index(heading), order) if heading in _FRONT_ORDER \
-            else (1, _BACK_ORDER.index(heading), order)
-        entries.append((line, key))
-    if progressive:
-        # The level each one opened: the last ones received, counting the ones still on their way.
-        progressive_id = game_data.ITEM_NAME_TO_ID[game_data.PROGRESSIVE_STORY_ITEM_NAME]
-        received = sum(1 for item in ctx.items_received if item.item == progressive_id)
-        first = received - len(progressive)
-        last = len(game_data.STORY_LEVELS) - 1
-        for k, position in enumerate(progressive):
-            level = min(max(first + k, 0), last)
-            line = None if ctx.last_played == ("story", level) else \
-                (game_data.AWARD_STORY, game_data.STORY_LEVEL_DATA[level][1])
-            entries[position] = (line, entries[position][1])
+            entries.append([(game_data.AWARD_ITEM, name), (*_ARMOUR, 0, order)])
+    # Progressive items show what you hold with each one: the last ones received, counting the
+    # ones still on their way.
+    received = [item.item for item in ctx.items_received]
+    for name, positions in progressive.items():
+        count = received.count(game_data.ITEM_NAME_TO_ID[name])
+        for k, position in enumerate(positions):
+            held = min(max(count - len(positions) + k + 1, 1), _most_copies(name))
+            line = _award_line(name, held)
+            if name == game_data.PROGRESSIVE_STORY_ITEM_NAME and ctx.last_played == ("story", held - 1):
+                line = None
+            entries[position][0] = line
     entries = [entry for entry in entries if entry[0] is not None]
     entries.sort(key=lambda entry: entry[1])
     front = [line for line, key in entries if key[0] == 0]
@@ -400,6 +486,158 @@ def award_hook(ctx: TsfpContext) -> bool:
             logger.error("Archipelago items will NOT show on the award screen: the game's code is not what "
                          "the client expects.")
     return state == "ready"
+
+
+_SHOP_RESTOCK_ID = game_data.ITEM_NAME_TO_ID[game_data.SHOP_RESTOCK_ITEM_NAME]
+SHOP_NOTICE_SECONDS = 1.5
+_TROPHY_FILLER_POINTS = {game_data.ITEM_NAME_TO_ID[name]: points
+                         for name, points in game_data.TROPHY_FILLER_POINTS.items()}
+
+
+def shop_points(ctx: TsfpContext) -> Optional[int]:
+    """Points to spend, or None until the server has said how many were earned by kills and spent."""
+    if ctx.shop_kills is None or ctx.shop_spent is None:
+        return None
+    filler = sum(_TROPHY_FILLER_POINTS.get(item.item, 0) for item in ctx.items_received)
+    return (ctx.shop_earned["trophies"] + ctx.shop_earned["story"] + ctx.shop_kills + ctx.shop_kills_pending
+            + filler - ctx.shop_spent)
+
+
+def shop_display_name(name: str) -> str:
+    """A Future Perfect item as the shop shows it, as on the award screen: a mission or story level
+    by its own name, a weapon buff as "<weapon> <buff>" (e.g. "Plasma Autorifle +25% Reserve Ammo")."""
+    if name in _MISSIONS_BY_ITEM:
+        return _MISSIONS_BY_ITEM[name].name
+    if name in game_data.STORY_ITEM_NAMES:
+        return game_data.STORY_LEVELS[game_data.STORY_ITEM_NAMES.index(name)]
+    return game_data.short_item_name(game_data.GAME_NAME, name)
+
+
+def display_item_name(ctx: TsfpContext, item_id: int, player: int) -> str:
+    """An item's name as the award screen and the shop show it: Future Perfect and TimeSplitters 2
+    items shortened (missions by their own name and so on), anything else as it is."""
+    try:
+        name = ctx.item_names.lookup_in_slot(item_id, player)
+    except Exception:
+        return "Unknown item"
+    slot_info = getattr(ctx, "slot_info", {}).get(player)
+    game = game_data.GAME_NAME if player == ctx.slot else getattr(slot_info, "game", None)
+    if game == game_data.GAME_NAME:
+        return shop_display_name(name)
+    return game_data.short_item_name(game, name)
+
+
+def _shop_item_text(ctx: TsfpContext, location: int, price: int) -> Optional[str]:
+    info = ctx.locations_info.get(location)
+    if info is None:
+        return None
+    name = display_item_name(ctx, info.item, info.player)
+    owner = "You" if info.player == ctx.slot else ctx.player_names.get(info.player, "Someone")
+    return f"{name} ({owner}) - {price} Points"
+
+
+def shop_rows(ctx: TsfpContext) -> tuple[list[str], list[Optional[int]]]:
+    """What each row shows, and the location each row is selling (None when it shows "Purchased")."""
+    size = ctx.shop_size
+    total = size // game_data.SHOP_ROWS
+    restocks = sum(1 for item in ctx.items_received if item.item == _SHOP_RESTOCK_ID)
+    batches = min(restocks + 1, total)
+    done = set(ctx.checked_locations) | ctx.shop_bought
+    rows, selling = [], []
+    for k in range(game_data.SHOP_ROWS):
+        c = 0
+        while c < total and game_data.shop_location_id(c * game_data.SHOP_ROWS + k) in done:
+            c += 1
+        if c >= batches:
+            rows.append("Purchased")
+            selling.append(None)
+            continue
+        index = c * game_data.SHOP_ROWS + k
+        price = ctx.shop_prices[index] if index < len(ctx.shop_prices) else 0
+        location = game_data.shop_location_id(index)
+        rows.append(_shop_item_text(ctx, location, price) or "Loading...")
+        selling.append(location)
+    return rows, selling
+
+
+async def run_shop(ctx: TsfpContext, levels: dict[str, int]) -> None:
+    """Count points, keep the shop menu up to date and handle what is bought there."""
+    new = ctx.kill_counter.poll(dolphin)
+    if new:
+        ctx.shop_kills_pending += new * game_data.KILL_POINTS
+    if ctx.shop_kills_pending and ctx.shop_kills is not None and ctx.server is not None:
+        added, ctx.shop_kills_pending = ctx.shop_kills_pending, 0
+        ctx.shop_kills += added
+        await ctx.send_msgs([{"cmd": "Set", "key": ctx.shop_kills_key, "default": 0, "want_reply": False,
+                              "operations": [{"operation": "add", "value": added}]}])
+    story = game_state.story_points(dolphin)
+    if story is not None:                       # a profile is loaded
+        ctx.shop_earned["trophies"] = game_state.trophy_points(levels)
+        ctx.shop_earned["story"] = story
+    if ctx.award_hide:
+        received = {item.item for item in ctx.items_received}
+        ctx.award_hide -= {item for item in ctx.award_hide
+                           if item in received and game_state.hide_from_award_screen(dolphin, item)}
+    state = ctx.shop_menu.install(dolphin)
+    if state != ctx.shop_state_logged:
+        ctx.shop_state_logged = state
+        if state == "installed":
+            logger.info("The Archipelago Shop is in Extras & Shop > Archipelago Shop (the old View Movies).")
+        elif state == "busy":
+            logger.error("The Archipelago Shop is NOT available: the memory it needs is in use. Turn off "
+                         "Gecko/cheat codes in Dolphin (Config > General > Enable Cheats), close any test tools, "
+                         "and restart the game.")
+        elif state == "unknown":
+            logger.error("The Archipelago Shop is NOT available: the game's code is not what the client expects.")
+    if state != "installed":
+        return
+    points = shop_points(ctx)
+    rows, selling = shop_rows(ctx)
+    ctx.shop_list = (points, rows)
+    title = "Archipelago Shop\n" + ("Connecting..." if points is None else f"{points} Points")
+    if ctx.shop_notice and time.monotonic() < ctx.shop_notice[1]:
+        title = ctx.shop_notice[0]
+    # Seeing an item in the shop sends a hint for it: the rows shown when the shop is opened, and a
+    # row's next item once buying it brings that up.
+    if ctx.server is not None and ctx.shop_hint_rows:
+        unhinted = sorted({selling[k] for k in ctx.shop_hint_rows} - {None} - ctx.shop_hinted
+                          - set(ctx.checked_locations))
+        unhinted = [location for location in unhinted if location in ctx.locations_info
+                    and (ctx.shop_hints == game_data.SHOP_HINTS_ALL
+                         or ctx.shop_hints == game_data.SHOP_HINTS_PROGRESSION
+                         and ctx.locations_info[location].flags & 0b001)]
+        ctx.shop_hint_rows = set()
+        if unhinted:
+            ctx.shop_hinted.update(unhinted)
+            await ctx.send_msgs([{"cmd": "LocationScouts", "locations": unhinted, "create_as_hint": 2}])
+    picks = ctx.shop_menu.update(dolphin, title, rows)
+    if ctx.shop_menu.just_opened:
+        ctx.shop_hint_rows = set(range(game_data.SHOP_ROWS))
+    for k in picks:
+        location = selling[k]
+        if location is None:
+            continue
+        index = location - game_data.shop_location_id(0)
+        price = ctx.shop_prices[index] if index < len(ctx.shop_prices) else 0
+        if points is None or ctx.server is None or location not in ctx.locations_info:
+            logger.info("The shop can't sell anything until the client is connected to the server.")
+            continue
+        if price > points:
+            logger.debug(f"Not enough points for that: it costs {price}, you have {points}.")
+            ctx.shop_notice = (f"Not Enough Points!\n{points} Points", time.monotonic() + SHOP_NOTICE_SECONDS)
+            continue
+        ctx.shop_bought.add(location)
+        ctx.shop_hint_rows.add(k)                  # its next item, if a restock has brought one
+        ctx.shop_spent = (ctx.shop_spent or 0) + price
+        points -= price
+        logger.debug(f"Bought {rows[k]} ({points} points left).")
+        info = ctx.locations_info[location]
+        if info.player == ctx.slot and info.item in game_data.AWARD_SNAPSHOT_ITEMS:
+            ctx.award_hide.add(info.item)          # bought here: not news on the award screen
+        ctx.reported_locations.add(location)
+        await ctx.send_msgs([{"cmd": "Set", "key": ctx.shop_spent_key, "default": 0, "want_reply": False,
+                              "operations": [{"operation": "add", "value": price}]},
+                             {"cmd": "LocationChecks", "locations": [location]}])
 
 
 def frame_hook(ctx: TsfpContext) -> bool:
@@ -450,6 +688,27 @@ async def death_link(ctx: TsfpContext, hook_ready: bool) -> None:
                     else "Death Link received, but you are not playing a mission, so nothing happened.")
 
 
+def enforce_resistances(ctx: TsfpContext, item_list: list[int], frame_hook_ready: bool) -> None:
+    """Keep player 1's damage resistances at the items held, and say so when they change."""
+    levels = game_state.resistance_levels(item_list)
+    state = game_state.enforce_resistances(dolphin, levels, frame_hook_ready)
+    logged = (state, tuple(sorted(levels.items())))
+    if logged == ctx.resist_logged:
+        return
+    ctx.resist_logged = logged
+    if state == "busy":
+        logger.error("Damage resistances are NOT active: the memory they need is in use. Turn off Gecko/cheat "
+                     "codes in Dolphin (Config > General > Enable Cheats), close any test tools, and restart the "
+                     "game.")
+    elif state == "unknown":
+        logger.error("Damage resistances are NOT active: the game's damage code is not what the client expects.")
+    elif state == "ready":
+        held = [f"{award} {round(game_data.RESISTANCE_STEP * 100 * levels[name])}%"
+                for name, award, _types in game_data.RESISTANCES if levels[name]]
+        if held:
+            logger.debug("Damage resistances: " + ", ".join(held) + ".")
+
+
 def enforce_misc_score(ctx: TsfpContext, multiplier: int) -> None:
     """Keep the Miscellaneous Challenges points at the multiplier you have, and say so when it changes."""
     state = game_state.enforce_misc_multiplier(dolphin, multiplier)
@@ -465,7 +724,7 @@ def enforce_misc_score(ctx: TsfpContext, multiplier: int) -> None:
         logger.error("Miscellaneous Challenges score multipliers are NOT active: the scoring code is not "
                      "what the client expects.")
     elif multiplier > 1:
-        logger.info(f"Miscellaneous Challenges points are now x{multiplier}.")
+        logger.debug(f"Miscellaneous Challenges points are now x{multiplier}.")
 
 
 def story_mask_for(ctx: TsfpContext) -> int:
@@ -506,8 +765,8 @@ async def dolphin_sync_task(ctx: TsfpContext) -> None:
                     if armour_level != ctx.armour_logged:      # said once, when the amount changes
                         ctx.armour_logged = armour_level
                         if armour_level:
-                            logger.info(f"Starting armour is now {armour_level * 25}% "
-                                        f"({armour_level} of {game_data.STARTING_ARMOUR_COPIES}).")
+                            logger.debug(f"Starting armour is now {armour_level * 25}% "
+                                         f"({armour_level} of {game_data.STARTING_ARMOUR_COPIES}).")
                 ctx.starting_armour.poll(dolphin, armour_level)
                 hook_ready = ctx.slot is not None and frame_hook(ctx)
                 ctx.announcer.poll(dolphin, hook_ready)
@@ -544,12 +803,16 @@ async def dolphin_sync_task(ctx: TsfpContext) -> None:
                         ctx.easier_logged = easier
                     levels = game_state.read_trophy_levels(dolphin)
                     await check_locations(ctx, levels, game_state.story_location_ids(dolphin))
+                    if ctx.shop_size:
+                        await run_shop(ctx, levels)
                     received = {item.item for item in ctx.items_received}
                     if ctx.conditions_ok:
                         game_state.enforce_unlocks(dolphin, received)
                         item_list = [item.item for item in ctx.items_received]
                         enforce_score(ctx, game_state.score_multiplier(item_list))
                         enforce_misc_score(ctx, game_state.misc_multiplier(item_list))
+                        if ctx.resistances:
+                            enforce_resistances(ctx, item_list, hook_ready)
                         skipped = game_state.enforce_weapon_buffs(dolphin, item_list)
                         if skipped != ctx.buffs_skipped:
                             ctx.buffs_skipped = skipped
@@ -557,7 +820,7 @@ async def dolphin_sync_task(ctx: TsfpContext) -> None:
                                 logger.warning("These weapon buffs are NOT applied because the game's value is not "
                                                "one the client recognises (restart the game to reset it): "
                                                + ", ".join(skipped))
-                        show_weapon_buffs(ctx, item_list)
+                        show_inventory(ctx, item_list)
                         story_state = game_state.enforce_story(dolphin, story_mask_for(ctx))
                         if story_state != ctx.story_state_logged:
                             ctx.story_state_logged = story_state
