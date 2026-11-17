@@ -24,7 +24,7 @@ UNLOCKS     The game decides whether something is unlocked by evaluating a small
 from dataclasses import dataclass
 
 GAME_NAME = "TimeSplitters Future Perfect"
-WORLD_VERSION = "1.3.1"     # keep in step with archipelago.json
+WORLD_VERSION = "1.5.0"     # keep in step with archipelago.json
 
 # The first 6 bytes of emulated memory (0x80000000) are the disc's game ID.
 GAME_ID_ADDRESS = 0x80000000
@@ -872,7 +872,9 @@ AWARD_STORY = "NEW STORY LEVEL AVAILABLE!"
 AWARD_MISSION = "NEW MISSION AVAILABLE!"
 AWARD_CHALLENGE = "NEW CHALLENGE AVAILABLE!"
 AWARD_ITEM = "ARCHIPELAGO ITEM FOUND!"
-AWARD_BUFF = "WEAPON BUFF FOUND!"
+AWARD_BUFF = "{stat} BUFF FOUND!"               # RESERVE AMMO / CLIP SIZE / ... (upper case)
+AWARD_SCORE = "SCORE MULTIPLIER FOUND!"
+AWARD_RESISTANCE = "DAMAGE RESISTANCE FOUND!"
 AWARD_OTHER_PLAYER = "{player}'S ITEM!"
 
 
@@ -1118,6 +1120,63 @@ def location_id(mission_index: int, tier: int) -> int:
     return BASE_ID + mission_index * len(TIERS) + (tier - 1)
 
 
+# ---- Archipelago Shop: locations, items and points (memory and code are at the end) ----
+SHOP_ROWS = 15                                   # rows the shop shows at once
+SHOP_SIZES = (15, 30, 45, 60, 75)
+SHOP_MAX = SHOP_SIZES[-1]
+SHOP_RESTOCK_ITEM_NAME = "Progressive Shop Restock"
+TROPHY_POINTS = (10, 20, 30, 40)                 # per grade, Bronze to Platinum
+STORY_POINTS = (15, 35, 50)                      # per difficulty, Easy to Hard
+KILL_POINTS = 1
+# Trophy filler items (only with the shop): points only. (grade, points, weight when picking one)
+TROPHY_FILLERS = (("Bronze", 10, 4), ("Silver", 20, 3), ("Gold", 30, 2), ("Platinum", 40, 1))
+TROPHY_FILLER_COPIES = 20                        # copies mixed in with the weapon buffs
+# Price ranges by what the item is (points).
+SHOP_PRICES = {"progression": (15, 200), "useful": (5, 75), "filler": (1, 15)}
+STORY_MIN_PRICE = 85                             # a story level never costs less
+SHOP_HINTS_NONE, SHOP_HINTS_ALL, SHOP_HINTS_PROGRESSION = 0, 1, 2
+
+
+def shop_location_name(index: int) -> str:
+    return f"Archipelago Shop Item {index + 1}"
+
+
+def shop_location_id(index: int) -> int:
+    return BASE_ID + 1200 + index
+
+
+# TimeSplitters 2's story level items, so they get the story price too.
+TS2_GAME_NAME = "TimeSplitters 2"
+TS2_STORY_ITEM_NAMES = ("1990 Siberia", "1932 Chicago", "1895 Notre Dame", "2280 Return to Planet X",
+                        "2019 NeoTokyo", "1853 Wild West", "1972 Atom Smasher", "1920 Aztec Ruins",
+                        "2315 Robot Factory", "2401 Space Station", "Progressive Story Level")
+_MISSION_PREFIXES = ("AL - ", "HL - ", "EL - ", "Challenge - ")
+
+
+def short_item_name(game: str, name: str) -> str:
+    """A TimeSplitters item's name as the award screen and the shop show it: a mission by its own
+    name ("AL - Beginners Series - Adios Amigos!" -> "Adios Amigos!"), a weapon buff as "<weapon>
+    <buff>" ("Weapon Buff - Pistols - +25% Reserve Ammo" -> "Pistols +25% Reserve Ammo") and a
+    TimeSplitters 2 cartridge without "Temporal Uplink - ". Other games' items are unchanged."""
+    if game not in (GAME_NAME, TS2_GAME_NAME):
+        return name
+    if name.startswith(_MISSION_PREFIXES) and name.count(" - ") >= 2:
+        return name.split(" - ", 2)[2]
+    if name.startswith("Weapon Buff - "):
+        return name.removeprefix("Weapon Buff - ").replace(" - ", " ", 1)
+    if game == TS2_GAME_NAME and name.startswith("Temporal Uplink - "):
+        return name.removeprefix("Temporal Uplink - ")
+    return name
+
+
+def trophy_filler_item_name(grade: str) -> str:
+    return f"{grade} Trophy"
+
+
+TROPHY_FILLER_ITEM_NAMES: tuple[str, ...] = tuple(trophy_filler_item_name(t[0]) for t in TROPHY_FILLERS)
+TROPHY_FILLER_POINTS = {trophy_filler_item_name(grade): points for grade, points, _w in TROPHY_FILLERS}
+
+
 LOCATION_NAME_TO_ID: dict[str, int] = {
     **{
         location_name(mission, tier): location_id(mission.index, tier)
@@ -1135,7 +1194,151 @@ LOCATION_NAME_TO_ID: dict[str, int] = {
         for slot, name, _hidden in objectives
     },
     **{name: location_id for name, location_id, _missions, _kind in MILESTONES},
+    **{shop_location_name(k): shop_location_id(k) for k in range(SHOP_MAX)},
 }
+
+# ---- Damage resistances ----
+# Every hit on a character ends in 0x8008DCD4 (armour, then health: Story Mode) or 0x8008DDE8 (the
+# character's own modifiers by damage type first: other modes), with the hit (0x5C bytes) in r3:
+# +0x0 the character hit, +0x4 the attacker, +0x18 the damage type, +0x20 the damage (float).
+# The client makes the first instruction of each jump to RESIST_CAVE, which multiplies the damage
+# by RESIST_TABLE[type] when the character hit is player 1 (*(*(PLAYER_STATE_POINTER))), then does
+# that instruction and jumps back. Dolphin keeps running code it has already compiled, so
+# FLUSH_ROUTINE, run from the "playing" table entry before the message code, clears its copies of
+# both (icbi) whenever the client sets RESIST_FLUSHED to 0.
+# The damage types (54, table 0x80404590): mapped in game with tsfp_resistance_test.py (Nov 2026).
+# Explosions do type 23 whatever caused them (rockets, grenades, mines, barrels); the projectile
+# types are listed too in case one hits directly. Types that no player weapon uses but that share
+# the game's impact handler with a group's types are in that group, for enemy-only weapons.
+RESISTANCE_COPIES = 6
+RESISTANCE_STEP = 0.10                       # 10% less damage per copy, at most 60%
+# (item name, award name, damage types)
+RESISTANCES: tuple[tuple[str, str, tuple[int, ...]], ...] = (
+    ("Progressive Bullet Damage Resistance", "Bullet Damage",
+     (3, 4, 6, 29, 32, 33, 5, 40)),          # pistols/rifles, SMGs/machine guns, Revolver/shotguns,
+                                             # Minigun (and Scifi Handgun ricochet), Injector, Harpoon
+    ("Progressive Explosive Damage Resistance", "Explosive Damage",
+     (23, 12, 14, 15, 16, 17, 18, 8, 9, 10, 11, 13, 19, 38, 39, 41, 42, 43, 48, 50)),
+                                             # 23 every explosion; grenades, mines, projectiles
+    ("Progressive Fire Damage Resistance", "Fire Damage",
+     (21, 22)),                              # Flamethrower, burning
+    ("Progressive Plasma Damage Resistance", "Plasma Damage",
+     (7, 24, 25, 26, 28, 31, 47, 27, 30, 45, 46, 49)),
+                                             # Dispersion Gun, Scifi Sniper, Ghost Gun, ElectroTool,
+                                             # Scifi Handgun, Plasma Autorifle, Mag-Charger
+    ("Progressive Melee Damage Resistance", "Melee Damage",
+     (0, 20, 1, 2)),                         # punches, every weapon's melee swing, Baseball Bat, Brick
+)
+RESISTANCE_ITEM_NAMES: tuple[str, ...] = tuple(r[0] for r in RESISTANCES)
+DAMAGE_TYPE_COUNT = 54
+_resisted = [t for r in RESISTANCES for t in r[2]]
+assert len(_resisted) == len(set(_resisted)) and all(0 <= t < DAMAGE_TYPE_COUNT for t in _resisted)
+
+RESIST_HOOKS = ((0x8008DCD4, 0x9421FFF0), (0x8008DDE8, 0x9421FFE0))   # (routine, first instruction)
+RESIST_CAVE = 0x80002000
+FLUSH_ROUTINE = 0x80002100
+RESIST_TABLE = 0x80002140                    # 54 floats: damage multiplier by type
+RESIST_FLUSHED = 0x80002220                  # 0: clear Dolphin's copies of the hooked code once
+RESIST_END = 0x80002224
+
+
+def _resist_branch(source: int, target: int) -> int:
+    return 0x48000000 | ((target - source) & 0x03FFFFFC)
+
+
+def _resist_cond(source: int, target: int, bo: int, bi: int) -> int:
+    return (16 << 26) | (bo << 21) | (bi << 16) | ((target - source) & 0xFFFC)
+
+
+def _build_resist_cave() -> tuple[int, ...]:
+    """Entry A (from 0x8008DCD4) at RESIST_CAVE, entry B (from 0x8008DDE8) at RESIST_CAVE + 8."""
+    c = RESIST_CAVE
+    lo = lambda address: address & 0xFFFF
+    code = [
+        0x39400000,                                            # 0  A: li r10, 0
+        _resist_branch(c + 4, c + 12),                         # 1  b body
+        0x39400001,                                            # 2  B: li r10, 1
+        0x3D800000 | ((PLAYER_STATE_POINTER + 0x8000) >> 16),  # 3  body: lis r12, state@ha
+        0x818C0000 | lo(PLAYER_STATE_POINTER),                 # 4  lwz r12, state@l(r12)
+        0x280C0000,                                            # 5  cmplwi r12, 0
+        0,                                                     # 6  beq done
+        0x818C0000,                                            # 7  lwz r12, 0(r12)     player 1
+        0x81630000,                                            # 8  lwz r11, 0(r3)      the one hit
+        0x7C0B6040,                                            # 9  cmplw r11, r12
+        0,                                                     # 10 bne done
+        0x81630018,                                            # 11 lwz r11, 0x18(r3)   damage type
+        0x280B0000 | (DAMAGE_TYPE_COUNT - 1),                  # 12 cmplwi r11, 53
+        0,                                                     # 13 bgt done
+        0x556B103A,                                            # 14 slwi r11, r11, 2
+        0x3D808000,                                            # 15 lis r12, 0x8000
+        0x398C0000 | lo(RESIST_TABLE),                         # 16 addi r12, r12, table
+        0x7C0C5C2E,                                            # 17 lfsx f0, r12, r11
+        0xC0230020,                                            # 18 lfs f1, 0x20(r3)
+    ]
+    code += [
+        0xEC210032,                                            # 19 fmuls f1, f1, f0
+        0xD0230020,                                            # 20 stfs f1, 0x20(r3)
+    ]
+    # done: (index 21)
+    done = c + 4 * len(code)
+    code += [
+        0x2C0A0000,                                            # cmpwi r10, 0
+        0,                                                     # beq back_a
+        RESIST_HOOKS[1][1],                                    # stwu r1, -0x20(r1)  (B's own)
+        0,                                                     # b 0x8008DDEC
+        RESIST_HOOKS[0][1],                                    # back_a: stwu r1, -0x10(r1) (A's own)
+        0,                                                     # b 0x8008DCD8
+    ]
+    k = (done - c) // 4
+    code[k + 1] = _resist_cond(done + 4, done + 16, 12, 2)
+    code[k + 3] = _resist_branch(done + 12, RESIST_HOOKS[1][0] + 4)
+    code[k + 5] = _resist_branch(done + 20, RESIST_HOOKS[0][0] + 4)
+    for index in (6, 10, 13):                                  # the early exits go to done
+        bo, bi = {6: (12, 2), 10: (4, 2), 13: (12, 1)}[index]
+        code[index] = _resist_cond(c + 4 * index, done, bo, bi)
+    assert c + 4 * len(code) <= FLUSH_ROUTINE
+    return tuple(code)
+
+
+RESIST_CAVE_CODE = _build_resist_cave()
+RESIST_HOOK_WORDS = {RESIST_HOOKS[0][0]: _resist_branch(RESIST_HOOKS[0][0], RESIST_CAVE),
+                     RESIST_HOOKS[1][0]: _resist_branch(RESIST_HOOKS[1][0], RESIST_CAVE + 8)}
+
+
+def _build_flush_routine() -> tuple[int, ...]:
+    """Run from the "playing" table entry: if RESIST_FLUSHED is 0, clear Dolphin's copies of the two
+    hooked routines and set it to 1; then on to the message code."""
+    lo = lambda address: address & 0xFFFF
+    code = [0x3D808000,                                        # lis r12, 0x8000
+            0x816C0000 | lo(RESIST_FLUSHED),                   # lwz r11, flushed(r12)
+            0x2C0B0000,                                        # cmpwi r11, 0
+            0]                                                 # bne skip
+    for address, _ in RESIST_HOOKS:
+        code += [0x3D600000 | (address >> 16),                 # lis r11, hi
+                 0x616B0000 | lo(address),                     # ori r11, r11, lo
+                 0x7C005FAC]                                   # icbi 0, r11
+    code += [0x4C00012C,                                       # isync
+             0x39600001,                                       # li r11, 1
+             0x916C0000 | lo(RESIST_FLUSHED)]                  # stw r11, flushed(r12)
+    skip = len(code)
+    code.append(_resist_branch(FLUSH_ROUTINE + 4 * skip, MESSAGE_CAVE))   # skip: b the message code
+    code[3] = _resist_cond(FLUSH_ROUTINE + 12, FLUSH_ROUTINE + 4 * skip, 4, 2)
+    assert FLUSH_ROUTINE + 4 * len(code) <= RESIST_TABLE
+    return tuple(code)
+
+
+FLUSH_ROUTINE_CODE = _build_flush_routine()
+
+
+def resistance_table(levels: dict[str, int]) -> tuple[float, ...]:
+    """The 54 damage multipliers for {item name: copies held}."""
+    table = [1.0] * DAMAGE_TYPE_COUNT
+    for name, _award, types in RESISTANCES:
+        multiplier = 1.0 - RESISTANCE_STEP * min(levels.get(name, 0), RESISTANCE_COPIES)
+        for t in types:
+            table[t] = multiplier
+    return tuple(table)
+
 
 ITEM_NAME_TO_ID: dict[str, int] = {
     **{m.item_name: BASE_ID + 1000 + m.index for m in MISSIONS},
@@ -1149,4 +1352,175 @@ ITEM_NAME_TO_ID: dict[str, int] = {
     MISC_MULTIPLIER_ITEM_NAME: BASE_ID + 6002,
     STARTING_ARMOUR_ITEM_NAME: BASE_ID + 6001,
     **{name: BASE_ID + 7000 + k for k, name in enumerate(WEAPON_BUFF_ITEM_NAMES)},
+    **{name: BASE_ID + 7600 + k for k, name in enumerate(RESISTANCE_ITEM_NAMES)},
+    SHOP_RESTOCK_ITEM_NAME: BASE_ID + 7700,
+    **{name: BASE_ID + 7710 + k for k, name in enumerate(TROPHY_FILLER_ITEM_NAMES)},
 }
+
+
+# ---- Archipelago Shop: the menu ----
+# Extras > View Movies becomes the shop: 15 rows, each one shop location's item and price; A buys
+# it with points. Shop location k is row k % 15 of batch k // 15; each batch after the first needs
+# one more Progressive Shop Restock. Confirmed in game with tools/tsfp_shop_test.py (see the shop
+# research notes):
+#   * the movie screen (record 0x80476610, builder 0x802DB054), the Extras screen (0x804771B8,
+#     0x802DF050) and the main menu (0x804771E8, 0x802DF25C) are started through wrappers of ours
+#     that clear Dolphin's copy of their builder (icbi) first, so the code changes below take effect
+#     every time they open; the movie screen's wrapper also counts openings;
+#   * the movie screen lists every row (its two "seen this movie?" calls become li r3, 1), stops
+#     at 15 rows instead of 20, uses a wider box (a 120.0 constant instead of 55.0) and a smaller
+#     row font (flags 0x32100 instead of 0x32200);
+#   * its rows' A-press callback becomes ours: it reports row + 1 in SHOP_PICK (unless a press is
+#     already waiting there). A movie never plays; the client decides what A does;
+#   * the movie title, the Extras title, the "View Movies" row and the main menu's "Extras" load
+#     our texts (lis/addi in place of li ID / bl the text lookup);
+#   * row texts: each movie's text ID (table 0x80471C54, +0xC) is a made-up ID that makes the game
+#     read one of our text slots (award_text_id). The game reads a row's text as it draws it, and
+#     centres it again, so the client simply rewrites a row's text when it changes.
+SHOP_TEXT_TABLE = AWARD_TEXT_TABLE
+SHOP_MOVIE_TABLE = 0x80471C54                    # 20 x 0x24 bytes, +0xC = the movie's text ID
+SHOP_MOVIE_RECORD, SHOP_MOVIE_BUILDER, SHOP_MOVIE_END = 0x80476610, 0x802DB054, 0x802DB220
+SHOP_EXTRAS_RECORD, SHOP_EXTRAS_BUILDER, SHOP_EXTRAS_END = 0x804771B8, 0x802DF050, 0x802DF118
+SHOP_MAIN_RECORD, SHOP_MAIN_BUILDER, SHOP_MAIN_END = 0x804771E8, 0x802DF25C, 0x802DF568
+SHOP_WIDE_CONSTANT = 0x8061A3A8                  # r2 - 0x1238: 120.0, the shop box's width
+SHOP_WIDE_VALUE = 0x42F00000
+SHOP_ROW_FLAGS = 0x32100                         # the user's choice (the game's: 0x32200)
+
+# Low memory (0x80001800-0x8000180B is the system's; the client's other code starts at 0x80002000).
+SHOP_MOVIE_WRAPPER = 0x80001840
+SHOP_EXTRAS_WRAPPER = 0x80001880
+SHOP_MAIN_WRAPPER = 0x800018C0
+SHOP_CALLBACK = 0x80001900
+SHOP_PICK = 0x80001920                           # row + 1 of the last A press, 0 = none waiting
+SHOP_OPENED = 0x80001924                         # how many times the shop has been opened
+SHOP_SLOTS = 0x80001940                          # 15 text pointers, one per row
+SHOP_TEXTS = 0x80001980                          # 15 x 80 bytes for rows, then 4 x 64
+SHOP_ROW_TEXT_SIZE, SHOP_TEXT_SIZE = 80, 64
+SHOP_TITLE, SHOP_EXTRAS_TITLE, SHOP_MENU_ROW, SHOP_MAIN_ROW = 15, 16, 17, 18   # text numbers
+SHOP_AREA_END = SHOP_TEXTS + SHOP_ROWS * SHOP_ROW_TEXT_SIZE + 4 * SHOP_TEXT_SIZE
+assert SHOP_AREA_END <= RESIST_CAVE
+SHOP_NAMES = {SHOP_EXTRAS_TITLE: "Extras & Shop", SHOP_MENU_ROW: "Archipelago Shop", SHOP_MAIN_ROW: "Extras & Shop"}
+
+
+def shop_text_address(n: int) -> int:
+    if n < SHOP_ROWS:
+        return SHOP_TEXTS + SHOP_ROW_TEXT_SIZE * n
+    return SHOP_TEXTS + SHOP_ROW_TEXT_SIZE * SHOP_ROWS + SHOP_TEXT_SIZE * (n - SHOP_ROWS)
+
+
+def shop_text_size(n: int) -> int:
+    return SHOP_ROW_TEXT_SIZE if n < SHOP_ROWS else SHOP_TEXT_SIZE
+
+
+def _shop_load_text(n: int) -> tuple[int, int]:
+    """lis r3, 0x8000 / addi r3, r3, text: in place of li r3, ID / bl the text lookup."""
+    return 0x3C608000, 0x38630000 | (shop_text_address(n) & 0xFFFF)
+
+
+def _shop_flag_words(flags: int) -> tuple[int, int]:
+    """lis r29, high / addi r5, r29, low (addi adds a signed low half)."""
+    return 0x3FA00000 | ((flags + 0x8000) >> 16) & 0xFFFF, 0x38BD0000 | (flags & 0xFFFF)
+
+
+# (address, the game's word, ours)
+SHOP_CODE_CHANGES = (
+    (0x802DB078, 0x4BEE6175, 0x38600001),                          # bl movie seen? -> li r3, 1
+    (0x802DB108, 0x4BEE60E5, 0x38600001),
+    (0x802DB094, 0x386019AA, _shop_load_text(SHOP_TITLE)[0]),      # li r3, 6570 (title)
+    (0x802DB098, 0x4BD2B125, _shop_load_text(SHOP_TITLE)[1]),
+    (0x802DB0A0, 0xC022EB58, 0xC022EDC8),                          # lfs r1, 55.0 -> 120.0 (box width)
+    (0x802DB0F0, 0x3C60802E, 0x3C608000),                          # lis r3, high(callback)
+    (0x802DB100, 0x3BC3B010, 0x3BC30000 | SHOP_CALLBACK & 0xFFFF), # addi r30, r3, low(callback)
+    (0x802DB0F4, 0x3FA00003, _shop_flag_words(SHOP_ROW_FLAGS)[0]), # row flags
+    (0x802DB12C, 0x38BD2200, _shop_flag_words(SHOP_ROW_FLAGS)[1]),
+    (0x802DB140, 0x2C1B0014, 0x2C1B0000 | SHOP_ROWS),              # cmpwi r27, 20 -> 15 rows
+    (0x802DF064, 0x38600403, _shop_load_text(SHOP_EXTRAS_TITLE)[0]),   # li r3, 1027 (Extras title)
+    (0x802DF068, 0x4BD27155, _shop_load_text(SHOP_EXTRAS_TITLE)[1]),
+    (0x802DF0B0, 0x38600408, _shop_load_text(SHOP_MENU_ROW)[0]),       # li r3, 1032 (View Movies)
+    (0x802DF0B4, 0x4BD27109, _shop_load_text(SHOP_MENU_ROW)[1]),
+    (0x802DF4BC, 0x38600403, _shop_load_text(SHOP_MAIN_ROW)[0]),       # li r3, 1027 (main menu Extras)
+    (0x802DF4C0, 0x4BD26CFD, _shop_load_text(SHOP_MAIN_ROW)[1]),
+)
+assert (SHOP_WIDE_CONSTANT - 0x8061B5E0) & 0xFFFF == 0xEDC8          # r2 = 0x8061B5E0
+
+
+def _shop_wrapper(at: int, builder: int, builder_end: int, count: bool) -> tuple[int, ...]:
+    code = []
+    if count:
+        code += [0x3D808000,                                    # lis   r12, 0x8000
+                 0x816C0000 | SHOP_OPENED & 0xFFFF,             # lwz   r11, OPENED(r12)
+                 0x396B0001,                                    # addi  r11, r11, 1
+                 0x916C0000 | SHOP_OPENED & 0xFFFF]             # stw   r11, OPENED(r12)
+    lines = (builder_end - (builder & ~31) + 31) // 32
+    code += [0x3D800000 | builder >> 16,                        # lis   r12, builder@h
+             0x618C0000 | builder & 0xFFE0,                     # ori   r12, r12, builder@l (cache line)
+             0x39600000 | lines,                                # li    r11, lines
+             0x7D6903A6,                                        # mtctr r11
+             0x7C0067AC,                                        # loop: icbi 0, r12
+             0x398C0020,                                        # addi  r12, r12, 0x20
+             0x4200FFF8,                                        # bdnz  loop
+             0x4C00012C]                                        # isync
+    code.append(0x48000000 | (builder - (at + 4 * len(code))) & 0x03FFFFFC)   # b the builder (r3 kept)
+    return tuple(code)
+
+
+SHOP_MOVIE_WRAPPER_CODE = _shop_wrapper(SHOP_MOVIE_WRAPPER, SHOP_MOVIE_BUILDER, SHOP_MOVIE_END, True)
+SHOP_EXTRAS_WRAPPER_CODE = _shop_wrapper(SHOP_EXTRAS_WRAPPER, SHOP_EXTRAS_BUILDER, SHOP_EXTRAS_END, False)
+SHOP_MAIN_WRAPPER_CODE = _shop_wrapper(SHOP_MAIN_WRAPPER, SHOP_MAIN_BUILDER, SHOP_MAIN_END, False)
+SHOP_CALLBACK_CODE = (
+    0x3C808000,                                                 # lis   r4, 0x8000
+    0x80040000 | SHOP_PICK & 0xFFFF,                            # lwz   r0, PICK(r4)
+    0x2C000000,                                                 # cmpwi r0, 0
+    0x4C820020,                                                 # bnelr             (one waiting already)
+    0x80030188,                                                 # lwz   r0, 0x188(r3)   the row chosen
+    0x30000001,                                                 # addic r0, r0, 1        row + 1
+    0x90040000 | SHOP_PICK & 0xFFFF,                            # stw   r0, PICK(r4)
+    0x4E800020,                                                 # blr
+)
+SHOP_CODE = ((SHOP_MOVIE_WRAPPER, SHOP_MOVIE_WRAPPER_CODE), (SHOP_EXTRAS_WRAPPER, SHOP_EXTRAS_WRAPPER_CODE),
+             (SHOP_MAIN_WRAPPER, SHOP_MAIN_WRAPPER_CODE), (SHOP_CALLBACK, SHOP_CALLBACK_CODE))
+SHOP_SCREENS = ((SHOP_MOVIE_RECORD, SHOP_MOVIE_BUILDER, SHOP_MOVIE_WRAPPER),
+                (SHOP_EXTRAS_RECORD, SHOP_EXTRAS_BUILDER, SHOP_EXTRAS_WRAPPER),
+                (SHOP_MAIN_RECORD, SHOP_MAIN_BUILDER, SHOP_MAIN_WRAPPER))
+assert SHOP_MOVIE_WRAPPER + 4 * len(SHOP_MOVIE_WRAPPER_CODE) <= SHOP_EXTRAS_WRAPPER
+assert SHOP_EXTRAS_WRAPPER + 4 * len(SHOP_EXTRAS_WRAPPER_CODE) <= SHOP_MAIN_WRAPPER
+assert SHOP_MAIN_WRAPPER + 4 * len(SHOP_MAIN_WRAPPER_CODE) <= SHOP_CALLBACK
+assert SHOP_CALLBACK + 4 * len(SHOP_CALLBACK_CODE) <= SHOP_PICK
+for _address, _game, _ours in SHOP_CODE_CHANGES:
+    assert any(builder <= _address < end for _r, builder, end in (
+        (0, SHOP_MOVIE_BUILDER, SHOP_MOVIE_END), (0, SHOP_EXTRAS_BUILDER, SHOP_EXTRAS_END),
+        (0, SHOP_MAIN_BUILDER, SHOP_MAIN_END)))
+
+PROFILE_IN_USE = 0x80501608                      # 0 = no profile loaded
+# Live kills: the match statistics, *(r13 - 0x5008), 0x90C bytes per player, numbers as floats;
+# stat 0 (+0x0) of player 1 is the kills this match (found with tools/tsfp_kill_finder.py in an
+# Arcade League mission and in Story). 0 while no match is set up; back to 0 for every match.
+MATCH_STATS_POINTER = 0x80612938
+MATCH_KILLS_OFFSET = 0x0
+
+# The award screen lists a character, weapon or cheat when its unlocked state differs from a copy
+# the game took after the last award screen (0x802D99E4): one word (0 or 1) each, characters
+# (150) at 0x805CE3C8, weapons (70) at 0x805CE620, cheats (16) at 0x805CE77C. Setting a word to 1
+# once the item is unlocked keeps it off the next award screen (used for items bought in the shop).
+AWARD_SNAPSHOT_CHARACTERS = 0x805CE3C8
+AWARD_SNAPSHOT_WEAPONS = 0x805CE620
+AWARD_SNAPSHOT_CHEATS = 0x805CE77C
+_WEAPON_CONDITIONS = 0x8043E248                  # weapon k's condition: + 0x3C * k
+
+
+def _weapon_index(condition: int) -> int:
+    return (condition - _WEAPON_CONDITIONS) // 0x3C
+
+
+# item ID: ((condition address, award snapshot word), ...)
+AWARD_SNAPSHOT_ITEMS: dict[int, tuple[tuple[int, int], ...]] = {
+    **{ITEM_NAME_TO_ID[character_item_name(name)]: ((address, AWARD_SNAPSHOT_CHARACTERS + 4 * index),)
+       for name, address, index, _default in CHARACTERS},
+    **{ITEM_NAME_TO_ID[cheat_item_name(name)]: ((address, AWARD_SNAPSHOT_CHEATS + 4 * index),)
+       for name, address, index in CHEATS},
+    **{ITEM_NAME_TO_ID[weapon_item_name(name)]: tuple(
+        (condition, AWARD_SNAPSHOT_WEAPONS + 4 * _weapon_index(condition))
+        for condition in (single, double) if condition is not None)
+       for name, _weapon, single, double in WEAPONS},
+}
+assert all(_weapon_index(single) == weapon for _n, weapon, single, _d in WEAPONS)
